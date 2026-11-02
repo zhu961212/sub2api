@@ -21,7 +21,9 @@ func parentHealthyForShadow(account *Account, lookup func(int64) *Account) bool 
 	if parent == nil {
 		return false
 	}
-	return parent.IsOpenAIOAuth() && parent.IsCredentialUsableForShadow()
+	// Local spending budgets are shared with the credential owner. Unlike an
+	// upstream model-specific 429, reaching this budget must block every route.
+	return parent.IsOpenAIOAuth() && parent.IsCredentialUsableForShadow() && !parent.IsQuotaExceeded()
 }
 
 // sparkModelVariants 返回所有归一到 spark 的模型 ID（当前仅 base：spark 无 effort 变体）。

@@ -827,7 +827,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			quotaPlatform := service.QuotaPlatform(c.Request.Context(), apiKey)
 			sessionID := service.ExtractClientSessionID(c)
 			cyberBlocked := service.GetOpsCyberPolicy(c) != nil
-			h.submitOpenAIUsageRecordTask(c.Request.Context(), res, func(ctx context.Context) {
+			h.submitOpenAIAccountUsageRecordTask(c.Request.Context(), account, res, func(ctx context.Context) {
 				if err := h.gatewayService.RecordUsage(ctx, &service.OpenAIRecordUsageInput{
 					Result:             res,
 					APIKey:             apiKey,
@@ -1421,7 +1421,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 			quotaPlatform := service.QuotaPlatform(c.Request.Context(), apiKey)
 			sessionID := service.ExtractClientSessionID(c)
 			cyberBlocked := service.GetOpsCyberPolicy(c) != nil
-			h.submitOpenAIUsageRecordTask(c.Request.Context(), res, func(ctx context.Context) {
+			h.submitOpenAIAccountUsageRecordTask(c.Request.Context(), account, res, func(ctx context.Context) {
 				if err := h.gatewayService.RecordUsage(ctx, &service.OpenAIRecordUsageInput{
 					Result:             res,
 					APIKey:             apiKey,
@@ -3040,6 +3040,9 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				return mapping.MappedModel, nil
 			},
 			BeforeTurn: func(turn int) error {
+				if err := h.gatewayService.CheckLocalAccountQuota(ctx, account); err != nil {
+					return service.NewOpenAIWSClientCloseError(coderws.StatusTryAgainLater, "account spending limit reached or unavailable, please reconnect", err)
+				}
 				// turn==1 的会话屏蔽已由握手层检查覆盖；连接内 flag 只拦截后续 turn。
 				if cyberBlockedThisConn && !h.cyberPolicyLogOnly(c, apiKey) {
 					return service.NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, cyberSessionBlockedClientMsg, nil)
@@ -3166,7 +3169,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				turnRecordPricingAt := turnPricing.currentOr(turnStart)
 				turnBillingAPIKey := turnBillingAPIKeys.forTurn(turn, apiKey)
 				cyberBlocked := service.GetOpsCyberPolicy(c) != nil
-				h.submitOpenAIUsageRecordTask(ctx, result, func(taskCtx context.Context) {
+				h.submitOpenAIAccountUsageRecordTask(ctx, account, result, func(taskCtx context.Context) {
 					if err := h.gatewayService.RecordUsage(taskCtx, &service.OpenAIRecordUsageInput{
 						Result:             result,
 						APIKey:             turnBillingAPIKey,
@@ -3455,6 +3458,10 @@ func (h *OpenAIGatewayHandler) submitUsageRecordTask(parent context.Context, tas
 		).Warn("openai.usage_record_task_stopped_sync_fallback")
 	}
 	// 回退路径：worker 池未注入或已停止时同步执行，避免退回到无界 goroutine 模式。
+	h.runUsageRecordTaskInline(task)
+}
+
+func (h *OpenAIGatewayHandler) runUsageRecordTaskInline(task service.UsageRecordTask) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	defer func() {
@@ -3466,6 +3473,39 @@ func (h *OpenAIGatewayHandler) submitUsageRecordTask(parent context.Context, tas
 		}
 	}()
 	task(ctx)
+}
+
+// Settle local account budgets without waiting behind the usage worker queue.
+// Shadow accounts share a parent's budget, absent from their selected snapshot.
+func (h *OpenAIGatewayHandler) submitOpenAIAccountUsageRecordTask(parent context.Context, account *service.Account, result *service.OpenAIForwardResult, task service.UsageRecordTask) {
+	if task == nil {
+		return
+	}
+	if h.settleAccountQuotaTaskInline(parent, account, result != nil && result.OpenAIWSMode, task) {
+		return
+	}
+	h.submitOpenAIUsageRecordTask(parent, result, task)
+}
+
+func (h *OpenAIGatewayHandler) submitMandatoryAccountUsageRecordTask(parent context.Context, account *service.Account, task service.UsageRecordTask) {
+	if task == nil {
+		return
+	}
+	if h.settleAccountQuotaTaskInline(parent, account, false, task) {
+		return
+	}
+	h.submitMandatoryUsageRecordTask(parent, task)
+}
+
+func (h *OpenAIGatewayHandler) settleAccountQuotaTaskInline(parent context.Context, account *service.Account, websocket bool, task service.UsageRecordTask) bool {
+	// Persistent connections can gain a local budget after the forwarding
+	// snapshot was created. RecordUsage reloads their current quota settings.
+	if account != nil && account.IsOpenAIOAuth() && (account.HasAnyQuotaLimit() || account.IsShadow() || websocket) {
+		task, _ = wrapUsageRecordTaskContext(parent, task)
+		h.runUsageRecordTaskInline(task)
+		return true
+	}
+	return false
 }
 
 func (h *OpenAIGatewayHandler) submitOpenAIUsageRecordTask(parent context.Context, result *service.OpenAIForwardResult, task service.UsageRecordTask) {
@@ -4332,10 +4372,9 @@ func (h *OpenAIGatewayHandler) enqueueCyberSessionBlockedOpsEntry(c *gin.Context
 	enqueueOpsErrorLog(h.opsService, buildCyberSessionBlockedOpsEntry(meta))
 }
 
-// recordCyberPolicyIfMarked 在 gateway forward 返回后检查 cyber 标记，异步写风控日志/邮件，
-// 并在 forward 返回错误时写一条 tokens=0 用量行。标记由 gateway 服务层在透传 cyber 后设置；
-// 当前请求已发给用户，本方法只做事后记录，不影响响应。forwardErrored 为 true 时才写用量行，
-// 避免与正常 RecordUsage(forward 成功路径)重复。每请求至多记录一次。
+// recordCyberPolicyIfMarked 在 gateway forward 返回后检查 cyber 标记，异步写风控日志/邮件。
+// forward 返回错误时按上游实际 token 记录用量；本地账号额度同步结算，不等待审核日志。
+// forwardErrored 为 true 时才写用量行，避免与正常 RecordUsage 成功路径重复。每请求至多记录一次。
 func (h *OpenAIGatewayHandler) recordCyberPolicyIfMarked(c *gin.Context, apiKey *service.APIKey, account *service.Account, subscription *service.UserSubscription, model string, forwardErrored bool, cyberBlockBody []byte, channelFields service.ChannelUsageFields, requestPayloadHash string) {
 	mark := service.GetOpsCyberPolicy(c)
 	if mark == nil {
@@ -4398,6 +4437,8 @@ func (h *OpenAIGatewayHandler) recordCyberPolicyIfMarked(c *gin.Context, apiKey 
 	// 提前拍成标量，避免在下方 goroutine 内访问 gin.Context。
 	sessionID := service.ExtractClientSessionID(c)
 	nativeCompactionV2 := service.IsOpenAINativeCompactionV2(c)
+	requestType := opsRequestTypeFromContext(c)
+	websocket := requestType != nil && *requestType == int16(service.RequestTypeWSV2)
 	apiKeyPrefix := ""
 	if apiKey != nil {
 		apiKeyPrefix = keyPrefix(apiKey.Key, 8)
@@ -4428,6 +4469,33 @@ func (h *OpenAIGatewayHandler) recordCyberPolicyIfMarked(c *gin.Context, apiKey 
 			cancel()
 		}
 	}
+	if forwardErrored && gwSvc != nil {
+		recordUsage := func(ctx context.Context) {
+			gwSvc.RecordCyberPolicyUsageLog(ctx, service.CyberPolicyUsageInput{
+				APIKey:             apiKey,
+				Account:            account,
+				Subscription:       subscription,
+				RequestID:          requestID,
+				Model:              model,
+				Stream:             stream,
+				OpenAIWSMode:       websocket,
+				InputTokens:        mark.UpstreamInTok,
+				OutputTokens:       mark.UpstreamOutTok,
+				InboundEndpoint:    inboundEndpoint,
+				UpstreamEndpoint:   upstreamEndpoint,
+				UserAgent:          userAgent,
+				IPAddress:          clientIPStr,
+				SessionID:          sessionID,
+				RequestPayloadHash: requestPayloadHash,
+				APIKeyService:      apiKeySvc,
+				NativeCompactionV2: nativeCompactionV2,
+				ChannelUsageFields: channelFields,
+			})
+		}
+		if !h.settleAccountQuotaTaskInline(requestCtx, account, websocket, recordUsage) {
+			h.submitMandatoryUsageRecordTask(requestCtx, recordUsage)
+		}
+	}
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
@@ -4448,27 +4516,6 @@ func (h *OpenAIGatewayHandler) recordCyberPolicyIfMarked(c *gin.Context, apiKey 
 				UpstreamStatus:  mark.UpstreamStatus,
 				UpstreamInTok:   mark.UpstreamInTok,
 				UpstreamOutTok:  mark.UpstreamOutTok,
-			})
-		}
-		if forwardErrored && gwSvc != nil {
-			gwSvc.RecordCyberPolicyUsageLog(ctx, service.CyberPolicyUsageInput{
-				APIKey:             apiKey,
-				Account:            account,
-				Subscription:       subscription,
-				RequestID:          requestID,
-				Model:              model,
-				Stream:             stream,
-				InputTokens:        mark.UpstreamInTok,
-				OutputTokens:       mark.UpstreamOutTok,
-				InboundEndpoint:    inboundEndpoint,
-				UpstreamEndpoint:   upstreamEndpoint,
-				UserAgent:          userAgent,
-				IPAddress:          clientIPStr,
-				SessionID:          sessionID,
-				RequestPayloadHash: requestPayloadHash,
-				APIKeyService:      apiKeySvc,
-				NativeCompactionV2: nativeCompactionV2,
-				ChannelUsageFields: channelFields,
 			})
 		}
 		if opsSvc != nil {

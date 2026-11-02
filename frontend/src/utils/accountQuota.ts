@@ -1,6 +1,7 @@
-import type { AccountType } from '@/types'
+import type { AccountPlatform, AccountType } from '@/types'
 
-/** 支持账号配额（总/日/周上限、quota_used 累加、超限停调度）的账号类型，与后端 AccountTypeSupportsQuota 一致。 */
-export function supportsAccountQuota(type?: AccountType | null): boolean {
-  return type === 'apikey' || type === 'bedrock' || type === 'service_account'
+/** 与后端 AccountSupportsQuota 一致；OpenAI OAuth 支持本地美元预算。 */
+export function supportsAccountQuota(type?: AccountType | null, platform?: AccountPlatform | null): boolean {
+  return type === 'apikey' || type === 'bedrock' || type === 'service_account' ||
+    (type === 'oauth' && platform === 'openai')
 }

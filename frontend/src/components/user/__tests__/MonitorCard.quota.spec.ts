@@ -2,6 +2,7 @@ import { mount } from '@vue/test-utils'
 import { describe, expect, it, vi } from 'vitest'
 
 import type { UserMonitorView } from '@/api/channelMonitor'
+import type { ChannelCatalogGroup } from '@/api/channelMonitorCatalog'
 import MonitorCard from '../monitor/MonitorCard.vue'
 
 const { isQuotaVisible } = vi.hoisted(() => ({
@@ -37,13 +38,14 @@ function makeItem(overrides: Partial<UserMonitorView> = {}): UserMonitorView {
   }
 }
 
-function mountCard(item: UserMonitorView) {
+function mountCard(item: UserMonitorView, groups?: ChannelCatalogGroup[]) {
   return mount(MonitorCard, {
     props: {
       item,
       window: '7d',
       availabilityValue: 100,
       countdownSeconds: 0,
+      groups,
     },
     global: {
       stubs: {
@@ -99,5 +101,30 @@ describe('MonitorCard quota snapshot visibility', () => {
     const wrapper = mountCard(makeItem({ primary_model: 'claude-sonnet-4-5' }))
     expect(wrapper.text()).toContain('claude-sonnet-4-5')
     expect(wrapper.text()).not.toContain('monitorCommon.checkMode.quota')
+  })
+})
+
+describe('MonitorCard group description', () => {
+  const groups: ChannelCatalogGroup[] = [{
+    id: 1, name: 'gpt 低价', platform: 'openai', rate_multiplier: 0.1, available_models: [],
+  }]
+
+  it.each([undefined, groups])('preserves a custom description with or without associated groups', associatedGroups => {
+    const description = 'luna按3倍计价。因为0.3倍率'
+    const wrapper = mountCard(makeItem({ name: 'gpt低价', group_name: description }), associatedGroups)
+    expect(wrapper.get('[data-testid="monitor-group-description"]').text()).toBe(description)
+  })
+
+  it('hides a description that repeats the monitor name without associated groups', () => {
+    const wrapper = mountCard(makeItem({ name: 'gpt低价', group_name: ' GPT 低价 ' }))
+    expect(wrapper.find('[data-testid="monitor-group-description"]').exists()).toBe(false)
+  })
+
+  it('hides a description that repeats any associated group name', () => {
+    const wrapper = mountCard(makeItem({ name: 'Key monitor', group_name: ' GPT 低价 ' }), [
+      { ...groups[0]!, id: 2, name: 'Another group' },
+      groups[0]!,
+    ])
+    expect(wrapper.find('[data-testid="monitor-group-description"]').exists()).toBe(false)
   })
 })

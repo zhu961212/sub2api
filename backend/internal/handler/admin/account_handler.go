@@ -676,7 +676,11 @@ func (h *AccountHandler) List(c *gin.Context) {
 		}
 	}
 
-	accounts, total, err := h.adminService.ListAccounts(c.Request.Context(), page, pageSize, platform, accountType, status, search, groupID, privacyMode, sortBy, sortOrder)
+	listContext := c.Request.Context()
+	if lite {
+		listContext = service.WithAccountListEvaluationSummaries(listContext)
+	}
+	accounts, total, err := h.adminService.ListAccounts(listContext, page, pageSize, platform, accountType, status, search, groupID, privacyMode, sortBy, sortOrder)
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return
@@ -2574,7 +2578,7 @@ func (h *AccountHandler) GetUsage(c *gin.Context) {
 		return
 	}
 
-	response.Success(c, usage)
+	response.Success(c, h.usageWithLocalQuota(c.Request.Context(), accountID, usage))
 }
 
 // ClearRateLimit handles clearing account rate limit status

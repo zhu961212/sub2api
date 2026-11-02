@@ -78,8 +78,9 @@ export default {
     },
     settings: {
       title: 'V2 data monitor config',
+      advanced: 'Error categories and health thresholds',
       description:
-        'Configure passive usage aggregation dimensions (platform / model / group) and refresh cadence. Health colors and details on the user /monitor page show rates, RPM, and TPM — not absolute request volume.',
+        'Choose monitored platforms, models, groups, and aggregation interval.',
       save: 'Save',
       loading: 'Loading…',
       loadFailed: 'Failed to load V2 config',
@@ -137,13 +138,13 @@ export default {
     },
     admin: {
       descriptionV1:
-        'System mode is V1 active probes: manage probe monitors and run checks now; V2 aggregation does not run.',
+        'Manage channel probes, availability, and response latency.',
       descriptionV2:
-        'System mode is V2 passive monitoring: configure aggregation dimensions; V1 active probes do not run.',
+        'Configure usage monitoring by platform, model, and group.',
       tabAria: 'Monitor management',
       tabV2: 'V2 data monitor config',
       tabV1Active: 'V1 active probes',
-      tabV1History: 'V1 history (probes not active in current mode)',
+      tabV1History: 'V1 probe history',
     },
   },
 }

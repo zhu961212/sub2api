@@ -1,9 +1,9 @@
 <template>
-  <button
-    type="button"
-    class="group text-left p-5 rounded-2xl min-h-[280px] w-full bg-white/70 backdrop-blur-xl border border-gray-200/80 shadow-card dark:bg-dark-800/60 dark:border-dark-700/70 hover:-translate-y-1 hover:shadow-card-hover dark:hover:border-primary-500/30 hover:border-gray-300 transition-all duration-300 ease-out flex flex-col"
-    @click="emit('click')"
+  <article
+    class="group overflow-hidden rounded-2xl min-h-[280px] w-full min-w-0 bg-white/70 backdrop-blur-xl border border-gray-200/80 shadow-card dark:bg-dark-800/60 dark:border-dark-700/70 hover:shadow-card-hover dark:hover:border-primary-500/30 hover:border-gray-300 transition-all duration-300 ease-out flex flex-col"
+    :data-testid="`monitor-card-${item.id}`"
   >
+    <button type="button" class="flex w-full min-w-0 flex-col p-5 text-left focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-primary-500" :aria-label="`${t('channelStatus.detailTitle')} · ${item.name}`" @click="emit('click')">
     <!-- Header: icon + name/model + status chip -->
     <div class="flex items-start gap-3">
       <span
@@ -13,10 +13,10 @@
         <ProviderIcon :provider="item.provider" :size="20" />
       </span>
       <div class="flex-1 min-w-0">
-        <div class="text-base font-semibold truncate text-gray-900 dark:text-gray-100">
+        <div class="text-base font-semibold break-words text-gray-900 dark:text-gray-100">
           {{ item.name }}
         </div>
-        <div class="mt-0.5 flex items-center gap-1.5 min-w-0">
+        <div class="mt-1 flex flex-wrap items-center gap-1.5 min-w-0">
           <span
             class="inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] font-medium flex-shrink-0"
             :class="providerBadgeClass(item.provider)"
@@ -24,14 +24,15 @@
             {{ providerLabel(item.provider) }}
           </span>
           <!-- 纯配额模式主模型是占位符 "quota"，展示层替换为本地化「配额」标签 -->
-          <span class="font-mono text-xs truncate text-gray-500 dark:text-gray-400">
+          <span class="min-w-0 break-all font-mono text-xs text-gray-500 dark:text-gray-400">
             {{ formatMonitorModel(item.primary_model) }}
           </span>
           <span
-            v-if="item.group_name"
-            class="inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] font-medium bg-gray-100 text-gray-600 dark:bg-dark-700 dark:text-gray-300 flex-shrink-0"
+            v-if="groupDescription"
+            data-testid="monitor-group-description"
+            class="max-w-full break-words rounded-md px-1.5 py-0.5 text-[10px] font-medium bg-gray-100 text-gray-600 dark:bg-dark-700 dark:text-gray-300"
           >
-            {{ item.group_name }}
+            {{ groupDescription }}
           </span>
         </div>
       </div>
@@ -44,7 +45,7 @@
     </div>
 
     <!-- Metrics -->
-    <MonitorMetricPair
+    <MonitorMetricPair class="w-full"
       primary-icon="bolt"
       :primary-label="t('monitorCommon.dialogLatency')"
       :primary-value="formatLatency(item.primary_latency_ms)"
@@ -59,7 +60,7 @@
     <MonitorQuotaView v-if="quotaVisible" :snapshot="item.latest_quota" class="mt-2" />
 
     <!-- Divider -->
-    <div class="mt-4 border-t border-gray-100 dark:border-dark-700/60"></div>
+    <div class="mt-4 w-full border-t border-gray-100 dark:border-dark-700/60"></div>
 
     <!-- Availability row -->
     <MonitorAvailabilityRow
@@ -69,17 +70,25 @@
     />
 
     <!-- Timeline -->
-    <MonitorTimeline
+    <MonitorTimeline class="w-full"
       :buckets="item.timeline"
       :countdown-seconds="countdownSeconds"
     />
-  </button>
+    </button>
+    <ChannelGroupDetails
+      v-if="groups?.length"
+      :groups="groups"
+      :monitor-name="item.name"
+      class="mx-5 mb-5 rounded-xl bg-gray-50/80 p-3 dark:bg-dark-900/40"
+    />
+  </article>
 </template>
 
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { UserMonitorView } from '@/api/channelMonitor'
+import type { ChannelCatalogGroup } from '@/api/channelMonitorCatalog'
 import {
   useChannelMonitorFormat,
   providerGradient,
@@ -90,6 +99,7 @@ import MonitorMetricPair from './MonitorMetricPair.vue'
 import MonitorAvailabilityRow from './MonitorAvailabilityRow.vue'
 import MonitorTimeline from './MonitorTimeline.vue'
 import MonitorQuotaView from '@/components/common/MonitorQuotaView.vue'
+import ChannelGroupDetails from './ChannelGroupDetails.vue'
 
 // 图标配色与 utils/platformColors.ts 的平台色对齐（新 4 家）。
 const PROVIDER_TINT: Record<string, string> = {
@@ -109,6 +119,7 @@ const props = defineProps<{
   window: '7d' | '15d' | '30d'
   availabilityValue: number | null
   countdownSeconds: number
+  groups?: ChannelCatalogGroup[]
 }>()
 
 const emit = defineEmits<{
@@ -128,6 +139,15 @@ const {
 const providerTintClass = computed(() =>
   PROVIDER_TINT[props.item.provider] ?? 'text-gray-500 dark:text-gray-300'
 )
+
+const groupDescription = computed(() => {
+  const description = props.item.group_name.trim()
+  const normalizeName = (name: string) => name.replace(/\s+/g, '').toLowerCase()
+  const normalized = normalizeName(description)
+  if (!normalized) return ''
+  const names = [props.item.name, ...(props.groups ?? []).map(group => group.name)]
+  return names.some(name => normalizeName(name) === normalized) ? '' : description
+})
 
 const quotaVisible = computed(
   () => isChannelMonitorQuotaVisible() && !!props.item.latest_quota

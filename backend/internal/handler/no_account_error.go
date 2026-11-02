@@ -153,6 +153,7 @@ func classifyNoAccountErrorFromGin(
 		ctx = c.Request.Context()
 	}
 	classification := classifyNoAccountError(ctx, diag, apiKey, routingModel, displayModel, platform)
+	classification = classifyLocalAccountQuotaFailure(ctx, diag, apiKey, routingModel, platform, classification)
 	if classification.ModelNotFound {
 		service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonLocalModelConfiguration)
 	}

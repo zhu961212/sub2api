@@ -26,6 +26,7 @@ type UsageBillingCommand struct {
 	AccountID           int64
 	SubscriptionID      *int64
 	AccountType         string
+	AccountPlatform     string
 	Model               string
 	ServiceTier         string
 	ReasoningEffort     string
@@ -42,6 +43,9 @@ type UsageBillingCommand struct {
 	APIKeyQuotaCost     float64
 	APIKeyRateLimitCost float64
 	AccountQuotaCost    float64
+	// AccountQuotaAccountID is set for a credential shadow whose budget belongs
+	// to its parent; zero preserves the normal AccountID attribution.
+	AccountQuotaAccountID int64
 
 	// AccountQuotaHasDailyLimit / AccountQuotaHasWeeklyLimit 记录构造命令时账号是否设置了日/周上限，
 	// 只用于选择账号配额累加语句，不参与幂等指纹；实际累加哪些维度以数据库中的账号配置为准。
@@ -137,6 +141,9 @@ func buildUsageBillingFingerprint(c *UsageBillingCommand) string {
 	if payloadHash := strings.TrimSpace(c.RequestPayloadHash); payloadHash != "" {
 		raw += "|" + payloadHash
 	}
+	if c.AccountQuotaAccountID > 0 && c.AccountQuotaAccountID != c.AccountID {
+		raw += fmt.Sprintf("|quota_account:%d", c.AccountQuotaAccountID)
+	}
 	sum := sha256.Sum256([]byte(raw))
 	return hex.EncodeToString(sum[:])
 }
@@ -159,12 +166,14 @@ func valueOrZero(v *int64) int64 {
 // AccountQuotaState holds the post-increment quota state returned by the DB transaction.
 // All values are post-update (i.e., already include the increment).
 type AccountQuotaState struct {
-	TotalUsed   float64
-	TotalLimit  float64
-	DailyUsed   float64
-	DailyLimit  float64
-	WeeklyUsed  float64
-	WeeklyLimit float64
+	TotalUsed     float64
+	TotalLimit    float64
+	DailyUsed     float64
+	DailyLimit    float64
+	WeeklyUsed    float64
+	WeeklyLimit   float64
+	FiveHourUsed  float64
+	FiveHourLimit float64
 }
 
 type UsageBillingApplyResult struct {

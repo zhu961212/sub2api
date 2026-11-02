@@ -16,6 +16,8 @@ const props = withDefaults(defineProps<{
   weeklyResetDay: number | null
   weeklyResetHour: number | null
   resetTimezone: string | null
+  dailyManaged?: boolean
+  dailyResetTimezone?: string
   quotaNotifyGlobalEnabled?: boolean
   quotaNotifyDailyEnabled?: boolean | null
   quotaNotifyDailyThreshold?: number | null
@@ -61,6 +63,7 @@ const emit = defineEmits<{
 }>()
 
 const enabled = computed(() =>
+  props.dailyManaged ||
   (props.totalLimit != null && props.totalLimit > 0) ||
   (props.dailyLimit != null && props.dailyLimit > 0) ||
   (props.weeklyLimit != null && props.weeklyLimit > 0)
@@ -125,7 +128,7 @@ const weeklyFixedHint = computed(() => {
 const dailyFixedHint = computed(() =>
   t('admin.accounts.quotaDailyLimitHintFixed', {
     hour: String(props.dailyResetHour ?? 0).padStart(2, '0'),
-    timezone: props.resetTimezone || 'UTC',
+    timezone: props.dailyResetTimezone || props.resetTimezone || 'UTC',
   })
 )
 </script>
@@ -147,6 +150,7 @@ const dailyFixedHint = computed(() =>
         </div>
         <button
           type="button"
+          :disabled="dailyManaged"
           @click="localEnabled = !localEnabled"
           :class="[
             'relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2',
@@ -164,7 +168,11 @@ const dailyFixedHint = computed(() =>
 
       <!-- Collapsible content -->
       <div v-if="localEnabled && !collapsed" class="space-y-2 p-4 pt-3">
+        <p v-if="dailyManaged" class="text-xs text-amber-700 dark:text-amber-400" data-testid="quota-managed-hint">
+          {{ t('admin.accounts.quotaManagedByPolicy') }}
+        </p>
         <!-- Daily quota -->
+        <fieldset :disabled="dailyManaged" :class="{ 'opacity-60': dailyManaged }">
         <QuotaDimensionRow
           dim="daily"
           :label="t('admin.accounts.quotaDailyLimit')"
@@ -176,7 +184,7 @@ const dailyFixedHint = computed(() =>
           :reset-mode="dailyResetMode"
           :reset-hour="dailyResetHour"
           :reset-day="null"
-          :reset-timezone="resetTimezone"
+          :reset-timezone="dailyResetTimezone || resetTimezone"
           :hint-rolling="t('admin.accounts.quotaDailyLimitHint')"
           :hint-fixed="dailyFixedHint"
           :hour-options="hourOptions"
@@ -190,6 +198,7 @@ const dailyFixedHint = computed(() =>
           @update:reset-hour="emit('update:dailyResetHour', $event)"
           @update:reset-timezone="emit('update:resetTimezone', $event)"
         />
+        </fieldset>
 
         <!-- Weekly quota -->
         <QuotaDimensionRow

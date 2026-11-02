@@ -6,6 +6,11 @@ import (
 )
 
 func lockScopedAdminAccount(ctx context.Context, tx *dbent.Tx, id int64) error {
+	// Policy saves lock the policy before updating account rows. Scoped writes
+	// must use the same order before scopedAdminTransaction takes its row locks.
+	if _, err := tx.Client().ExecContext(ctx, `SELECT pg_advisory_xact_lock_shared(86420110)`); err != nil {
+		return err
+	}
 	_, err := tx.Client().ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('scoped_admin_account:' || $1::text, 0))`, id)
 	return err
 }

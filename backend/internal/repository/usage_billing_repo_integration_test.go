@@ -488,6 +488,9 @@ func TestIncrementUsageBillingAccountQuota_StatementVariantsMatchFullStatement(t
 	}{
 		{name: "no_limits", extra: map[string]any{}, dailyUnset: true, weeklyUnset: true},
 		{name: "total_only", extra: map[string]any{"quota_limit": 100.0, "quota_used": 3.0}, dailyUnset: true, weeklyUnset: true},
+		{name: "five_hour_only_active", extra: map[string]any{"quota_5h_limit": 10.0, "quota_5h_used": 3.0, "quota_5h_start": at(-time.Hour)}, dailyUnset: true, weeklyUnset: true},
+		{name: "five_hour_only_expired", extra: map[string]any{"quota_5h_limit": 10.0, "quota_5h_used": 9.0, "quota_5h_start": at(-6 * time.Hour)}, dailyUnset: true, weeklyUnset: true},
+		{name: "five_hour_only_unstarted", extra: map[string]any{"quota_5h_limit": 10.0}, dailyUnset: true, weeklyUnset: true},
 		{name: "zero_and_negative_period_limits", extra: map[string]any{"quota_limit": 5.0, "quota_daily_limit": 0.0, "quota_weekly_limit": -1.0}, dailyUnset: true, weeklyUnset: true},
 		{name: "null_period_limits", extra: map[string]any{"quota_daily_limit": nil, "quota_weekly_limit": nil}, dailyUnset: true, weeklyUnset: true},
 		{name: "string_period_limits", extra: map[string]any{"quota_daily_limit": "10", "quota_weekly_limit": "0"}},

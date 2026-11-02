@@ -136,7 +136,7 @@ const isShadow = computed(() => props.account?.parent_account_id != null)
 const isOpenAIOAuthParent = computed(() => isOpenAIOAuth.value && !isShadow.value)
 const supportsPrivacy = computed(() => (isAntigravityOAuth.value || isOpenAIOAuth.value) && !isShadow.value)
 const hasQuotaLimit = computed(() => {
-  return supportsAccountQuota(props.account?.type) && (
+  return supportsAccountQuota(props.account?.type, props.account?.platform) && (
     (props.account?.quota_limit ?? 0) > 0 ||
     (props.account?.quota_daily_limit ?? 0) > 0 ||
     (props.account?.quota_weekly_limit ?? 0) > 0

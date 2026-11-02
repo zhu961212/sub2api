@@ -168,6 +168,12 @@ func runMainServer() {
 		}
 	}
 
+	// Diagnostics may use the OAuth transport plugin; start their workers only
+	// after the plugin host is ready, including when resuming saved settings.
+	if app.ModelEvaluation != nil {
+		app.ModelEvaluation.Start()
+	}
+
 	// 启动服务器
 	go func() {
 		if err := app.Server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -183,6 +189,9 @@ func runMainServer() {
 	<-quit
 
 	log.Println("Shutting down server...")
+	if app.ModelEvaluation != nil {
+		app.ModelEvaluation.Stop()
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

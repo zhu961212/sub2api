@@ -25,10 +25,11 @@ import (
 )
 
 type Application struct {
-	Server        *http.Server
-	PromptAudit   *securityaudit.PromptService
-	PluginManager *service.PluginManager
-	Cleanup       func()
+	Server          *http.Server
+	PromptAudit     *securityaudit.PromptService
+	PluginManager   *service.PluginManager
+	ModelEvaluation *service.ModelEvaluationAutoService
+	Cleanup         func()
 }
 
 func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
@@ -58,7 +59,7 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 		provideCleanup,
 
 		// Application struct
-		wire.Struct(new(Application), "Server", "PromptAudit", "PluginManager", "Cleanup"),
+		wire.Struct(new(Application), "Server", "PromptAudit", "PluginManager", "ModelEvaluation", "Cleanup"),
 	)
 	return nil, nil
 }
@@ -127,6 +128,7 @@ func provideCleanup(
 	upstreamBillingProbe *service.UpstreamBillingProbeService,
 	ollamaCloudUsage *service.OllamaCloudUsageService,
 	opencodeGoUsage *service.OpenCodeGoUsageService,
+	modelEvaluationAuto *service.ModelEvaluationAutoService,
 	auditLog *service.AuditLogService,
 	openAIAutoReset *service.OpenAIQuotaAutoResetService,
 	promptAudit *securityaudit.PromptService,
@@ -396,6 +398,12 @@ func provideCleanup(
 			{"OpenCodeGoUsageService", func() error {
 				if opencodeGoUsage != nil {
 					opencodeGoUsage.Stop()
+				}
+				return nil
+			}},
+			{"ModelEvaluationAutoService", func() error {
+				if modelEvaluationAuto != nil {
+					modelEvaluationAuto.Stop()
 				}
 				return nil
 			}},

@@ -258,7 +258,9 @@ func (s *OpenAIOAuthService) RefreshTokenWithClientID(ctx context.Context, refre
 // 从 accounts/check 获取最新 plan_type、subscription_expires_at、email，
 // 然后尝试关闭训练数据共享。适用于所有获取/刷新 token 的路径。
 func (s *OpenAIOAuthService) enrichTokenInfo(ctx context.Context, tokenInfo *OpenAITokenInfo, proxyURL string) {
-	if tokenInfo.AccessToken == "" || s.privacyClientFactory == nil {
+	// Diagnostics only need authentication. Avoid extra subscription/privacy
+	// requests and preserve upstream privacy settings during a quality probe.
+	if hasAccountEvaluationProxy(ctx) || tokenInfo.AccessToken == "" || s.privacyClientFactory == nil {
 		return
 	}
 
@@ -344,8 +346,11 @@ func (s *OpenAIOAuthService) RefreshAccountToken(ctx context.Context, account *A
 		return nil, infraerrors.New(http.StatusBadRequest, "OPENAI_OAUTH_INVALID_ACCOUNT_TYPE", "account is not an OAuth account")
 	}
 
-	var proxyURL string
-	if account.ProxyID != nil && s.proxyRepo != nil {
+	proxyURL, bound, proxyErr := accountEvaluationProxyFromContext(ctx, account)
+	if proxyErr != nil {
+		return nil, proxyErr
+	}
+	if !bound && account.ProxyID != nil && s.proxyRepo != nil {
 		proxy, err := s.proxyRepo.GetByID(ctx, *account.ProxyID)
 		if err == nil && proxy != nil {
 			proxyURL = proxy.URL()

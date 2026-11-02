@@ -700,6 +700,7 @@ func (s *OpenAIGatewayService) billingDeps() *billingDeps {
 		billingCacheService:   s.billingCacheService,
 		deferredService:       s.deferredService,
 		balanceNotifyService:  s.balanceNotifyService,
+		schedulerSnapshot:     s.schedulerSnapshot,
 		userPlatformQuotaRepo: s.userPlatformQuotaRepo,
 	}
 }

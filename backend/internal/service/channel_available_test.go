@@ -176,6 +176,41 @@ func TestListAvailable_DefaultsEmptyBillingModelSource(t *testing.T) {
 	require.Equal(t, BillingModelSourceUpstream, byName["explicit"])
 }
 
+func TestListAvailable_MonitorInventoryUsesConfiguredRestrictionBeforeDisplayPricing(t *testing.T) {
+	for _, tc := range []struct {
+		source string
+		want   []string
+	}{
+		{BillingModelSourceChannelMapped, []string{"mapped-alias", "priced-target", "wildcard-alias"}},
+		{BillingModelSourceResponse, []string{"mapped-alias", "priced-target", "wildcard-alias"}},
+		{BillingModelSourceRequested, []string{"priced-alias", "priced-target"}},
+		{BillingModelSourceUpstream, []string{"mapped-alias", "priced-alias", "priced-target", "unpriced-alias", "wildcard-alias"}},
+	} {
+		t.Run(tc.source, func(t *testing.T) {
+			channel := Channel{ID: 1, Status: StatusActive, BillingModelSource: tc.source, RestrictModels: true,
+				ModelMapping: map[string]map[string]string{PlatformOpenAI: {
+					"unpriced-alias": "unpriced-target", "mapped-alias": "priced-target",
+					"priced-alias": "unpriced-target", "wildcard-alias": "gpt-allowed-1",
+				}},
+				ModelPricing: []ChannelModelPricing{{Platform: PlatformOpenAI, Models: []string{"priced-target", "priced-alias", "gpt-allowed-*"}}},
+			}
+			svc := newAvailableChannelService([]Channel{channel}, &stubGroupRepoForAvailable{})
+			out, err := svc.ListAvailable(context.Background())
+			require.NoError(t, err)
+			require.Len(t, out, 1)
+			require.Len(t, out[0].SupportedModels, 5, "the existing available-channels model view remains unchanged")
+			got := make([]string, 0)
+			for _, model := range out[0].MonitorSupportedModels {
+				got = append(got, model.Name)
+			}
+			require.Equal(t, tc.want, got)
+		})
+	}
+	channel := &Channel{RestrictModels: true, BillingModelSource: BillingModelSourceChannelMapped}
+	require.NotNil(t, channelMonitorSupportedModels(channel, []SupportedModel{{Name: "unpriced", Platform: PlatformOpenAI}}), "an authoritative empty list must not fall back to the old inventory")
+	require.Empty(t, channelMonitorSupportedModels(channel, []SupportedModel{{Name: "unpriced", Platform: PlatformOpenAI}}))
+}
+
 func TestPricingNeedsFallback(t *testing.T) {
 	tests := []struct {
 		name string

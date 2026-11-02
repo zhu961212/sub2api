@@ -1441,9 +1441,15 @@ func AccountTypeSupportsQuota(accountType string) bool {
 	return false
 }
 
-// SupportsAccountQuota 返回账号是否支持账号配额，类型集合见 AccountTypeSupportsQuota。
+// AccountSupportsQuota also enables local spending limits for OpenAI OAuth accounts.
+// Other OAuth platforms retain their upstream-specific quota semantics.
+func AccountSupportsQuota(accountType, platform string) bool {
+	return AccountTypeSupportsQuota(accountType) || (accountType == AccountTypeOAuth && platform == PlatformOpenAI)
+}
+
+// SupportsAccountQuota 返回账号是否支持本地费用配额。影子账号使用母账号的配额。
 func (a *Account) SupportsAccountQuota() bool {
-	return AccountTypeSupportsQuota(a.Type)
+	return a != nil && !a.IsCredentialShadow() && AccountSupportsQuota(a.Type, a.Platform)
 }
 
 func (a *Account) IsOpenAI() bool {
@@ -2625,6 +2631,24 @@ func (a *Account) GetQuotaUsed() float64 {
 	return a.getExtraFloat64("quota_used")
 }
 
+// GetQuota5hLimit returns the local account spending limit for a five-hour period.
+func (a *Account) GetQuota5hLimit() float64 {
+	return a.getExtraFloat64("quota_5h_limit")
+}
+
+func (a *Account) GetQuota5hUsed() float64 {
+	return a.getExtraFloat64("quota_5h_used")
+}
+
+// Quota5hResetAt is anchored to the first bill in the current period.
+func (a *Account) Quota5hResetAt() time.Time {
+	start := a.getExtraTime("quota_5h_start")
+	if start.IsZero() {
+		return time.Time{}
+	}
+	return start.Add(5 * time.Hour)
+}
+
 // GetQuotaDailyLimit 获取日额度限制（美元），0 表示未启用
 func (a *Account) GetQuotaDailyLimit() float64 {
 	return a.getExtraFloat64("quota_daily_limit")
@@ -2764,6 +2788,13 @@ func (a *Account) GetQuotaResetTimezone() string {
 	return "UTC"
 }
 
+func (a *Account) GetQuotaDailyResetTimezone() string {
+	if tz := a.getExtraString("quota_daily_reset_timezone"); tz != "" {
+		return tz
+	}
+	return a.GetQuotaResetTimezone()
+}
+
 // --- Quota Notification Getters ---
 
 // QuotaNotifyConfig returns the notify configuration for a given quota dimension.
@@ -2823,9 +2854,9 @@ func (a *Account) GetQuotaNotifyTotalThresholdType() string {
 // nextFixedDailyReset 计算在 after 之后的下一个每日固定重置时间点
 func nextFixedDailyReset(hour int, tz *time.Location, after time.Time) time.Time {
 	t := after.In(tz)
-	today := time.Date(t.Year(), t.Month(), t.Day(), hour, 0, 0, 0, tz)
+	today := fixedDailyResetOnDate(t.Year(), t.Month(), t.Day(), hour, tz)
 	if !after.Before(today) {
-		return today.AddDate(0, 0, 1)
+		return fixedDailyResetOnDate(t.Year(), t.Month(), t.Day()+1, hour, tz)
 	}
 	return today
 }
@@ -2833,11 +2864,36 @@ func nextFixedDailyReset(hour int, tz *time.Location, after time.Time) time.Time
 // lastFixedDailyReset 计算 now 之前最近一次的每日固定重置时间点
 func lastFixedDailyReset(hour int, tz *time.Location, now time.Time) time.Time {
 	t := now.In(tz)
-	today := time.Date(t.Year(), t.Month(), t.Day(), hour, 0, 0, 0, tz)
+	today := fixedDailyResetOnDate(t.Year(), t.Month(), t.Day(), hour, tz)
 	if now.Before(today) {
-		return today.AddDate(0, 0, -1)
+		return fixedDailyResetOnDate(t.Year(), t.Month(), t.Day()-1, hour, tz)
 	}
 	return today
+}
+
+// fixedDailyResetOnDate matches PostgreSQL's AT TIME ZONE behavior at DST
+// transitions: a missing wall-clock hour shifts forward, and a repeated hour
+// uses its later occurrence. Resolve each calendar day independently so a
+// shifted reset does not move the configured hour on subsequent days.
+func fixedDailyResetOnDate(year int, month time.Month, day, hour int, tz *time.Location) time.Time {
+	wall := time.Date(year, month, day, hour, 0, 0, 0, time.UTC)
+	guess := time.Date(year, month, day, hour, 0, 0, 0, tz)
+	var latest, latestMatch time.Time
+	for _, sample := range []time.Time{guess.Add(-24 * time.Hour), guess, guess.Add(24 * time.Hour)} {
+		_, offset := sample.Zone()
+		candidate := wall.Add(-time.Duration(offset) * time.Second).In(tz)
+		if candidate.After(latest) {
+			latest = candidate
+		}
+		if candidate.Year() == wall.Year() && candidate.Month() == wall.Month() && candidate.Day() == wall.Day() &&
+			candidate.Hour() == hour && candidate.Minute() == 0 && candidate.After(latestMatch) {
+			latestMatch = candidate
+		}
+	}
+	if !latestMatch.IsZero() {
+		return latestMatch
+	}
+	return latest
 }
 
 // nextFixedWeeklyReset 计算在 after 之后的下一个每周固定重置时间点
@@ -2872,7 +2928,7 @@ func (a *Account) isFixedDailyPeriodExpired(periodStart time.Time) bool {
 	if periodStart.IsZero() {
 		return true
 	}
-	tz, err := time.LoadLocation(a.GetQuotaResetTimezone())
+	tz, err := loadQuotaResetLocation(a.GetQuotaDailyResetTimezone())
 	if err != nil {
 		tz = time.UTC
 	}
@@ -2885,7 +2941,7 @@ func (a *Account) isFixedWeeklyPeriodExpired(periodStart time.Time) bool {
 	if periodStart.IsZero() {
 		return true
 	}
-	tz, err := time.LoadLocation(a.GetQuotaResetTimezone())
+	tz, err := loadQuotaResetLocation(a.GetQuotaResetTimezone())
 	if err != nil {
 		tz = time.UTC
 	}
@@ -2901,7 +2957,7 @@ func ComputeQuotaResetAt(extra map[string]any) {
 	if tzName == "" {
 		tzName = "UTC"
 	}
-	tz, err := time.LoadLocation(tzName)
+	tz, err := loadQuotaResetLocation(tzName)
 	if err != nil {
 		tz = time.UTC
 	}
@@ -2912,7 +2968,8 @@ func ComputeQuotaResetAt(extra map[string]any) {
 		if hour < 0 || hour > 23 {
 			hour = 0
 		}
-		resetAt := nextFixedDailyReset(hour, tz, now)
+		dailyTZ := quotaDailyResetLocation(extra, tz)
+		resetAt := nextFixedDailyReset(hour, dailyTZ, now)
 		extra["quota_daily_reset_at"] = resetAt.UTC().Format(time.RFC3339)
 	} else {
 		delete(extra, "quota_daily_reset_at")
@@ -2953,7 +3010,7 @@ func NormalizeFixedQuotaWindows(extra map[string]any) {
 	if tzName == "" {
 		tzName = "UTC"
 	}
-	tz, err := time.LoadLocation(tzName)
+	tz, err := loadQuotaResetLocation(tzName)
 	if err != nil {
 		tz = time.UTC
 	}
@@ -2963,7 +3020,7 @@ func NormalizeFixedQuotaWindows(extra map[string]any) {
 		if hour < 0 || hour > 23 {
 			hour = 0
 		}
-		lastReset := lastFixedDailyReset(hour, tz, now)
+		lastReset := lastFixedDailyReset(hour, quotaDailyResetLocation(extra, tz), now)
 		start := parseExtraTime(extra["quota_daily_start"])
 		if start.IsZero() || start.Before(lastReset) {
 			extra["quota_daily_used"] = 0.0
@@ -2992,14 +3049,28 @@ func NormalizeFixedQuotaWindows(extra map[string]any) {
 	}
 }
 
+func quotaDailyResetLocation(extra map[string]any, fallback *time.Location) *time.Location {
+	if name, _ := extra["quota_daily_reset_timezone"].(string); name != "" {
+		if loc, err := loadQuotaResetLocation(name); err == nil {
+			return loc
+		}
+	}
+	return fallback
+}
+
 // ValidateQuotaResetConfig 校验配额固定重置时间配置的合法性
 func ValidateQuotaResetConfig(extra map[string]any) error {
 	if extra == nil {
 		return nil
 	}
+	if tz, _ := extra["quota_daily_reset_timezone"].(string); tz != "" {
+		if _, err := loadQuotaResetLocation(tz); err != nil {
+			return errors.New("invalid quota_daily_reset_timezone: must be a valid IANA timezone name")
+		}
+	}
 	// 校验时区
 	if tz, ok := extra["quota_reset_timezone"].(string); ok && tz != "" {
-		if _, err := time.LoadLocation(tz); err != nil {
+		if _, err := loadQuotaResetLocation(tz); err != nil {
 			return errors.New("invalid quota_reset_timezone: must be a valid IANA timezone name")
 		}
 	}
@@ -3041,7 +3112,7 @@ func ValidateQuotaResetConfig(extra map[string]any) error {
 
 // HasAnyQuotaLimit 检查是否配置了任一维度的配额限制
 func (a *Account) HasAnyQuotaLimit() bool {
-	return a.GetQuotaLimit() > 0 || a.GetQuotaDailyLimit() > 0 || a.GetQuotaWeeklyLimit() > 0
+	return a.GetQuotaLimit() > 0 || a.GetQuota5hLimit() > 0 || a.GetQuotaDailyLimit() > 0 || a.GetQuotaWeeklyLimit() > 0
 }
 
 // isPeriodExpired 检查指定周期（自 periodStart 起经过 dur）是否已过期
@@ -3050,6 +3121,10 @@ func isPeriodExpired(periodStart time.Time, dur time.Duration) bool {
 		return true // 从未使用过，视为过期（下次 increment 会初始化）
 	}
 	return time.Since(periodStart) >= dur
+}
+
+func (a *Account) IsQuota5hPeriodExpired() bool {
+	return isPeriodExpired(a.getExtraTime("quota_5h_start"), 5*time.Hour)
 }
 
 // IsDailyQuotaPeriodExpired 检查日配额周期是否已过期（用于显示层判断是否需要将 used 归零）
@@ -3074,6 +3149,9 @@ func (a *Account) IsWeeklyQuotaPeriodExpired() bool {
 func (a *Account) IsQuotaExceeded() bool {
 	// 总额度
 	if limit := a.GetQuotaLimit(); limit > 0 && a.GetQuotaUsed() >= limit {
+		return true
+	}
+	if limit := a.GetQuota5hLimit(); limit > 0 && !a.IsQuota5hPeriodExpired() && a.GetQuota5hUsed() >= limit {
 		return true
 	}
 	// 日额度（周期过期视为未超限，下次 increment 会重置）

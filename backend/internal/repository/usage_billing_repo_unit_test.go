@@ -222,7 +222,7 @@ func TestDeductUsageBillingBalance_ReturnsUserNotFoundWhenNoUserUpdated(t *testi
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-var accountQuotaStateColumns = []string{"quota_used", "quota_limit", "quota_daily_used", "quota_daily_limit", "quota_weekly_used", "quota_weekly_limit"}
+var accountQuotaStateColumns = []string{"quota_used", "quota_limit", "quota_daily_used", "quota_daily_limit", "quota_weekly_used", "quota_weekly_limit", "quota_5h_used", "quota_5h_limit"}
 
 func TestAccountQuotaIncrementSQLs_GuardOmittedDimensions(t *testing.T) {
 	for _, daily := range []bool{false, true} {
@@ -250,7 +250,7 @@ func TestIncrementUsageBillingAccountQuota_UsesStatementMatchingHints(t *testing
 	require.NoError(t, err)
 	mock.ExpectQuery(accountQuotaIncrementSQLs[accountQuotaIncrementSQLIndex(true, false)]).
 		WithArgs(2.5, int64(9)).
-		WillReturnRows(sqlmock.NewRows(accountQuotaStateColumns).AddRow(12.5, 100.0, 2.5, 50.0, 0.0, 0.0))
+		WillReturnRows(sqlmock.NewRows(accountQuotaStateColumns).AddRow(12.5, 100.0, 2.5, 50.0, 0.0, 0.0, 0.0, 0.0))
 	mock.ExpectCommit()
 
 	state, err := incrementUsageBillingAccountQuota(ctx, tx, 9, 2.5, true, false)
@@ -276,7 +276,7 @@ func TestIncrementUsageBillingAccountQuota_FallsBackToFullStatementWhenGuardMiss
 		WillReturnRows(sqlmock.NewRows(accountQuotaStateColumns))
 	mock.ExpectQuery(accountQuotaIncrementSQLs[accountQuotaIncrementSQLIndex(true, true)]).
 		WithArgs(2.5, int64(9)).
-		WillReturnRows(sqlmock.NewRows(accountQuotaStateColumns).AddRow(2.5, 0.0, 0.0, 0.0, 2.5, 20.0))
+		WillReturnRows(sqlmock.NewRows(accountQuotaStateColumns).AddRow(2.5, 0.0, 0.0, 0.0, 2.5, 20.0, 0.0, 0.0))
 	mock.ExpectCommit()
 
 	state, err := incrementUsageBillingAccountQuota(ctx, tx, 9, 2.5, false, false)

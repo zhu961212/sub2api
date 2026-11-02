@@ -4,6 +4,7 @@ import ChannelStatusV1View from '../ChannelStatusV1View.vue'
 
 const mocks = vi.hoisted(() => ({ list: vi.fn(), status: vi.fn() }))
 vi.mock('@/api/channelMonitor', () => mocks)
+vi.mock('@/api/channelMonitorCatalog', () => ({ getChannelMonitorCatalog: vi.fn().mockResolvedValue([]) }))
 vi.mock('@/stores/app', () => ({ useAppStore: () => ({ cachedPublicSettings: { channel_monitor_enabled: true }, showError: vi.fn() }) }))
 vi.mock('vue-i18n', async () => ({
   ...await vi.importActual<typeof import('vue-i18n')>('vue-i18n'),

@@ -289,6 +289,7 @@ const isQuotaExceeded = computed(() => {
     typeof limit === 'number' && limit > 0 && typeof used === 'number' && used >= limit
   return (
     exceeded(props.account.quota_used, props.account.quota_limit) ||
+    exceeded(props.account.quota_5h_used, props.account.quota_5h_limit) ||
     exceeded(props.account.quota_daily_used, props.account.quota_daily_limit) ||
     exceeded(props.account.quota_weekly_used, props.account.quota_weekly_limit)
   )

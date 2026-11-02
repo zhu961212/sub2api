@@ -1,0 +1,13 @@
+# Layer over docker-compose.local.yml; never run the official image by accident.
+services:
+  sub2api:
+    image: ${SUB2API_IMAGE:-sub2api-custom:local}
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      args:
+        VERSION: ${SUB2API_VERSION:-custom-v2}
+        COMMIT: ${SUB2API_COMMIT:-local}
+    labels:
+      org.opencontainers.image.source: https://github.com/zhu961212/sub2api
+      org.opencontainers.image.revision: ${SUB2API_COMMIT:-local}

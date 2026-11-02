@@ -78,8 +78,9 @@ export default {
     },
     settings: {
       title: 'V2 数据监控配置',
+      advanced: '错误分类与健康阈值',
       description:
-        '配置被动用量汇总维度（平台 / 模型 / 分组）与刷新频率。健康色与明细在用户端 /monitor 以比例、RPM/TPM 展示，不暴露绝对请求量。',
+        '设置监控平台、模型、分组与汇总频率。',
       save: '保存',
       loading: '加载中...',
       loadFailed: 'V2 配置加载失败',
@@ -133,12 +134,12 @@ export default {
       },
     },
     admin: {
-      descriptionV1: '当前系统设置为 V1 主动探测：可管理监控项并立即检测；V2 聚合不会运行。',
-      descriptionV2: '当前系统设置为 V2 被动监控：配置聚合维度；V1 主动探测不会运行。',
+      descriptionV1: '管理渠道探测，查看可用率与响应延迟。',
+      descriptionV2: '配置用量监控，按平台、模型与分组查看运行状态。',
       tabAria: '监控管理',
       tabV2: 'V2 数据监控配置',
       tabV1Active: 'V1 主动探测',
-      tabV1History: 'V1 历史（当前模式未启用探测）',
+      tabV1History: 'V1 探测记录',
     },
   },
 }

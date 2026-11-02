@@ -289,6 +289,9 @@ type Account struct {
 	// API Key 账号配额限制
 	QuotaLimit       *float64 `json:"quota_limit,omitempty"`
 	QuotaUsed        *float64 `json:"quota_used,omitempty"`
+	Quota5hLimit     *float64 `json:"quota_5h_limit,omitempty"`
+	Quota5hUsed      *float64 `json:"quota_5h_used,omitempty"`
+	Quota5hResetAt   *string  `json:"quota_5h_reset_at,omitempty"`
 	QuotaDailyLimit  *float64 `json:"quota_daily_limit,omitempty"`
 	QuotaDailyUsed   *float64 `json:"quota_daily_used,omitempty"`
 	QuotaWeeklyLimit *float64 `json:"quota_weekly_limit,omitempty"`
@@ -397,6 +400,9 @@ type AccountListItem struct {
 
 	QuotaLimit       *float64 `json:"quota_limit,omitempty"`
 	QuotaUsed        *float64 `json:"quota_used,omitempty"`
+	Quota5hLimit     *float64 `json:"quota_5h_limit,omitempty"`
+	Quota5hUsed      *float64 `json:"quota_5h_used,omitempty"`
+	Quota5hResetAt   *string  `json:"quota_5h_reset_at,omitempty"`
 	QuotaDailyLimit  *float64 `json:"quota_daily_limit,omitempty"`
 	QuotaDailyUsed   *float64 `json:"quota_daily_used,omitempty"`
 	QuotaWeeklyLimit *float64 `json:"quota_weekly_limit,omitempty"`

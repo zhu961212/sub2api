@@ -2471,9 +2471,9 @@
           @update:quotaNotifyTotalThresholdType="quotaNotifyState.total.thresholdType = $event"
         />
       </div>
-      <!-- 配额控制 (非 Anthropic apikey/bedrock，以及 Vertex service_account) -->
+      <!-- Local spending limits; centrally managed daily budgets remain read-only. -->
       <div
-        v-else-if="supportsAccountQuota(account?.type)"
+        v-else-if="!isSparkShadow && supportsAccountQuota(account?.type, account?.platform)"
         class="border-t border-gray-200 pt-4 dark:border-dark-600 space-y-4"
       >
         <div class="mb-3">
@@ -2483,6 +2483,8 @@
           </p>
         </div>
         <QuotaLimitCard
+          :daily-managed="account?.extra?.openai_daily_quota_managed === true"
+          :daily-reset-timezone="dailyQuotaResetTimezone"
           :totalLimit="editQuotaLimit"
           :dailyLimit="editQuotaDailyLimit"
           :weeklyLimit="editQuotaWeeklyLimit"
@@ -3523,6 +3525,10 @@ const selectableGroups = computed(() => {
 // Spark 影子账号(parent_account_id 非空):代理恒继承母账号,不可独立编辑(外审 B/P1),
 // 故隐藏代理选择器。
 const isSparkShadow = computed(() => props.account?.parent_account_id != null)
+const dailyQuotaResetTimezone = computed(() => {
+  const timezone = props.account?.extra?.quota_daily_reset_timezone
+  return typeof timezone === 'string' ? timezone : undefined
+})
 
 const hideAccountLongContextBilling = computed(() => {
   return allSelectedGroupsEnableLongContextPricing(form.group_ids, props.groups)
@@ -4740,7 +4746,7 @@ const syncFormFromAccount = (newAccount: Account | null) => {
   }
 
   // Load quota limit for apikey/bedrock/service_account accounts (bedrock quota is also loaded in its own branch above)
-  if (supportsAccountQuota(newAccount.type)) {
+  if (!newAccount.parent_account_id && supportsAccountQuota(newAccount.type, newAccount.platform)) {
     const quotaVal = extra?.quota_limit as number | undefined
     editQuotaLimit.value = (quotaVal && quotaVal > 0) ? quotaVal : null
     const dailyVal = extra?.quota_daily_limit as number | undefined
@@ -6318,7 +6324,7 @@ const handleSubmit = async () => {
     }
 
     // For apikey/bedrock/service_account accounts, handle quota_limit in extra
-    if (supportsAccountQuota(props.account.type)) {
+    if (!isSparkShadow.value && supportsAccountQuota(props.account.type, props.account.platform)) {
       const currentExtra = (updatePayload.extra as Record<string, unknown>) ||
         (props.account.extra as Record<string, unknown>) || {}
       const newExtra: Record<string, unknown> = { ...currentExtra }

@@ -114,6 +114,9 @@ func TestDuplicateAccountCopiesConfigurationAndResetsRuntimeState(t *testing.T) 
 			"items":                           []any{map[string]any{"enabled": true}},
 			"quota_limit":                     1000,
 			"quota_used":                      450,
+			"quota_5h_limit":                  5,
+			"quota_5h_used":                   4,
+			"quota_5h_start":                  "2026-07-15T00:00:00Z",
 			"quota_daily_used":                25,
 			"quota_daily_start":               "2026-07-15T00:00:00Z",
 			"model_rate_limits":               map[string]any{"gpt-5": "2099-01-01T00:00:00Z"},
@@ -162,6 +165,7 @@ func TestDuplicateAccountCopiesConfigurationAndResetsRuntimeState(t *testing.T) 
 		"config":         map[string]any{"region": "us-east-1"},
 		"items":          []any{map[string]any{"enabled": true}},
 		"quota_limit":    float64(1000),
+		"quota_5h_limit": float64(5),
 		"codex_cli_only": true,
 	}, duplicate.Extra)
 	require.NotContains(t, duplicate.Extra, UpstreamBillingRateSyncEnabledExtraKey)

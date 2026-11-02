@@ -573,6 +573,18 @@ export default {
     detailLoadError: 'Failed to load channel detail',
     detailTitle: 'Channel Detail',
     closeDetail: 'Close',
+    catalog: {
+      title: 'Channel groups and available models',
+      description: 'Group rates and configured models available to your account.',
+      rate: 'Group rate',
+      customRate: 'Custom',
+      models: 'Available models',
+      moreModels: '{count} more models',
+      noModels: 'No available models configured',
+      empty: 'No accessible channel groups.',
+      loadError: 'Could not load channel groups and models. Please retry.',
+      retry: 'Retry'
+    },
     windowTab: {
       '7d': '7 days',
       '15d': '15 days',

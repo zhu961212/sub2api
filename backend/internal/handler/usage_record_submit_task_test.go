@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/stretchr/testify/require"
 )
@@ -158,6 +159,47 @@ func TestOpenAIGatewayHandlerSubmitMandatoryUsageRecordTask_DroppedTaskSyncFallb
 	close(release)
 
 	require.True(t, called.Load(), "mandatory usage task must run synchronously when async submit is dropped")
+}
+
+func TestOpenAIGatewayHandlerAccountQuotaSettlesBeforeQueuedUsage(t *testing.T) {
+	parentID := int64(1)
+	for _, tc := range []struct {
+		account   *service.Account
+		websocket bool
+	}{
+		{account: &service.Account{Platform: service.PlatformOpenAI, Type: service.AccountTypeOAuth, Extra: map[string]any{"quota_daily_limit": 20.0}}},
+		{account: &service.Account{Platform: service.PlatformOpenAI, Type: service.AccountTypeOAuth, Extra: map[string]any{"quota_5h_limit": 5.0}}},
+		{account: &service.Account{Platform: service.PlatformOpenAI, Type: service.AccountTypeOAuth, ParentAccountID: &parentID}},
+		{account: &service.Account{Platform: service.PlatformOpenAI, Type: service.AccountTypeOAuth}, websocket: true},
+	} {
+		account := tc.account
+		pool := service.NewUsageRecordWorkerPoolWithOptions(service.UsageRecordWorkerPoolOptions{
+			WorkerCount: 1, QueueSize: 8, TaskTimeout: time.Second, OverflowPolicy: "drop",
+		})
+		blocked, release := make(chan struct{}), make(chan struct{})
+		pool.Submit(func(context.Context) { close(blocked); <-release })
+		<-blocked
+		func() {
+			defer pool.Stop()
+			defer close(release)
+			h := &OpenAIGatewayHandler{usageRecordWorkerPool: pool}
+			parent, cancel := context.WithCancel(context.WithValue(context.Background(), ctxkey.ClientRequestID, "quota-request"))
+			cancel()
+			called := false
+			h.submitOpenAIAccountUsageRecordTask(parent, account, &service.OpenAIForwardResult{OpenAIWSMode: tc.websocket}, func(ctx context.Context) {
+				called = true
+				require.NoError(t, ctx.Err(), "a disconnected caller must not cancel account settlement")
+				require.Equal(t, "quota-request", ctx.Value(ctxkey.ClientRequestID))
+			})
+			require.True(t, called, "account quota settlement must finish while the usage worker is still blocked")
+			if !tc.websocket {
+				called = false
+				h.submitMandatoryAccountUsageRecordTask(parent, account, func(context.Context) { called = true })
+				require.True(t, called, "image and search quota settlement must also finish before returning")
+			}
+			require.Zero(t, pool.Stats().WaitingTasks)
+		}()
+	}
 }
 
 func TestOpenAIGatewayHandlerSubmitOpenAIUsageRecordTask_ImageResultUsesMandatoryFallback(t *testing.T) {

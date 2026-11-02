@@ -1735,6 +1735,39 @@ describe('EditAccountModal', () => {
     expect(extra?.quota_weekly_limit).toBeUndefined()
   })
 
+  it('edits an OpenAI OAuth daily budget and preserves other account settings', async () => {
+    const account = buildOpenAIOAuthParentAccount()
+    account.extra = { quota_daily_limit: 20, quota_daily_used: 3, quota_daily_reset_mode: 'fixed', quota_daily_reset_hour: 0, quota_reset_timezone: 'Asia/Shanghai' }
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+    const wrapper = mountModal(account)
+    const card = wrapper.getComponent({ name: 'QuotaLimitCard' })
+    expect(card.props('dailyLimit')).toBe(20)
+    card.vm.$emit('update:dailyLimit', 35)
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra).toMatchObject({ quota_daily_limit: 35, quota_daily_reset_mode: 'fixed', quota_reset_timezone: 'Asia/Shanghai' })
+    wrapper.unmount()
+  })
+
+  it('keeps a policy-managed daily budget read-only while leaving the weekly row editable', () => {
+    const account = buildOpenAIOAuthParentAccount()
+    account.extra = { openai_daily_quota_managed: true, quota_daily_limit: 20, quota_daily_reset_mode: 'fixed', quota_daily_reset_hour: 0, quota_daily_reset_timezone: 'Asia/Shanghai' }
+    const wrapper = mountModal(account)
+    const card = wrapper.getComponent({ name: 'QuotaLimitCard' })
+    expect(card.get('[data-testid="quota-managed-hint"]').text()).toContain('admin.accounts.quotaManagedByPolicy')
+    expect(card.get('fieldset').attributes('disabled')).toBeDefined()
+    expect(card.props('dailyResetTimezone')).toBe('Asia/Shanghai')
+    wrapper.unmount()
+  })
+
+  it('ignores malformed daily quota timezones from account metadata', () => {
+    const account = buildOpenAIOAuthParentAccount()
+    account.extra = { quota_daily_limit: 20, quota_daily_reset_timezone: 123 }
+    const wrapper = mountModal(account)
+    expect(wrapper.getComponent({ name: 'QuotaLimitCard' }).props('dailyResetTimezone')).toBeUndefined()
+    wrapper.unmount()
+  })
+
   it('blocks Vertex SA save when neither credentials_status nor legacy json indicates existence', async () => {
     const account = buildVertexAccount()
     account.credentials = {

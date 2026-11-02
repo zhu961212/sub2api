@@ -100,6 +100,15 @@ func TestMain(m *testing.M) {
 		log.Printf("failed to apply db migrations: %v", err)
 		os.Exit(1)
 	}
+	// Evaluation concurrency tests use their own schema and a small outbox
+	// fixture. Reuse this real server so the standard integration target runs
+	// their lease, MVCC, history-retention, and transaction rollback checks.
+	if os.Getenv("MODEL_EVALUATION_TEST_DSN") == "" {
+		if err := os.Setenv("MODEL_EVALUATION_TEST_DSN", dsn); err != nil {
+			log.Printf("failed to configure model evaluation test database: %v", err)
+			os.Exit(1)
+		}
+	}
 
 	// 创建 ent client 用于集成测试
 	drv := entsql.OpenDB(dialect.Postgres, integrationDB)

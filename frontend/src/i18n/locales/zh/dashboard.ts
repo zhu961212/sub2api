@@ -578,6 +578,18 @@ export default {
     detailLoadError: '加载渠道详情失败',
     detailTitle: '渠道详情',
     closeDetail: '关闭',
+    catalog: {
+      title: '渠道分组与可用模型',
+      description: '按当前账号可访问的分组展示倍率及配置支持的模型。',
+      rate: '分组倍率',
+      customRate: '专属',
+      models: '可用模型',
+      moreModels: '另有 {count} 个模型',
+      noModels: '暂无已配置的可用模型',
+      empty: '暂无可访问的渠道分组。',
+      loadError: '无法加载渠道分组和模型，请重试。',
+      retry: '重试'
+    },
     windowTab: {
       '7d': '7 天',
       '15d': '15 天',

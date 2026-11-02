@@ -38,6 +38,10 @@ type AvailableChannel struct {
 	RestrictModels     bool
 	Groups             []AvailableGroupRef
 	SupportedModels    []SupportedModel
+	// MonitorSupportedModels applies configuration-time dispatch restrictions
+	// before global display pricing is filled. Internal to the status catalog;
+	// the existing available-channels response keeps using SupportedModels.
+	MonitorSupportedModels []SupportedModel `json:"-"`
 }
 
 // ListAvailable 返回所有渠道的可用视图：每个渠道附带关联分组信息与支持模型列表。
@@ -93,17 +97,19 @@ func (s *ChannelService) ListAvailable(ctx context.Context) ([]AvailableChannel,
 		ch.normalizeBillingModelSource()
 
 		supported := ch.SupportedModels()
+		monitorSupported := channelMonitorSupportedModels(ch, supported)
 		fillGlobalPricingFallback(s.pricingService, supported)
 
 		out = append(out, AvailableChannel{
-			ID:                 ch.ID,
-			Name:               ch.Name,
-			Description:        ch.Description,
-			Status:             ch.Status,
-			BillingModelSource: ch.BillingModelSource,
-			RestrictModels:     ch.RestrictModels,
-			Groups:             groups,
-			SupportedModels:    supported,
+			ID:                     ch.ID,
+			Name:                   ch.Name,
+			Description:            ch.Description,
+			Status:                 ch.Status,
+			BillingModelSource:     ch.BillingModelSource,
+			RestrictModels:         ch.RestrictModels,
+			Groups:                 groups,
+			SupportedModels:        supported,
+			MonitorSupportedModels: monitorSupported,
 		})
 	}
 
@@ -111,6 +117,32 @@ func (s *ChannelService) ListAvailable(ctx context.Context) ([]AvailableChannel,
 		return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name)
 	})
 	return out, nil
+}
+
+// Reuse dispatch's configured mapping, pricing and wildcard rules. The upstream
+// billing source depends on the selected account, so it has no static precheck.
+func channelMonitorSupportedModels(channel *Channel, models []SupportedModel) []SupportedModel {
+	out := make([]SupportedModel, 0, len(models))
+	if !channel.RestrictModels || channel.BillingModelSource == BillingModelSourceUpstream {
+		return append(out, models...)
+	}
+	lookups := make(map[string]*channelLookup)
+	for _, model := range models {
+		lookup := lookups[model.Platform]
+		if lookup == nil {
+			cache := newEmptyChannelCache()
+			expandPricingToCache(cache, channel, 0, model.Platform)
+			expandMappingToCache(cache, channel, 0, model.Platform)
+			lookup = &channelLookup{cache: cache, channel: channel, platform: model.Platform}
+			lookups[model.Platform] = lookup
+		}
+		mapping := resolveMapping(lookup, 0, model.Name)
+		billingModel := billingModelForRestriction(channel.BillingModelSource, model.Name, mapping.MappedModel)
+		if !checkRestricted(lookup, 0, billingModel) {
+			out = append(out, model)
+		}
+	}
+	return out
 }
 
 // fillGlobalPricingFallback 对未命中渠道定价的支持模型，从全局 LiteLLM 数据合成一份

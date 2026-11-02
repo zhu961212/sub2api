@@ -2,8 +2,9 @@ import { flushPromises, shallowMount } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import ChannelStatusV1View from '../ChannelStatusV1View.vue'
 
-const { list } = vi.hoisted(() => ({ list: vi.fn() }))
+const { list, reloadCatalog } = vi.hoisted(() => ({ list: vi.fn(), reloadCatalog: vi.fn() }))
 vi.mock('@/api/channelMonitor', () => ({ list, status: vi.fn() }))
+vi.mock('@/api/channelMonitorCatalog', () => ({ getChannelMonitorCatalog: reloadCatalog }))
 vi.mock('@/stores/app', () => ({ useAppStore: () => ({ cachedPublicSettings: { channel_monitor_enabled: true }, showError: vi.fn() }) }))
 vi.mock('vue-i18n', async () => ({
   ...await vi.importActual<typeof import('vue-i18n')>('vue-i18n'),
@@ -20,7 +21,7 @@ const mountView = () => shallowMount(ChannelStatusV1View, {
   } },
 })
 let wrapper: ReturnType<typeof mountView>
-beforeEach(() => { vi.useFakeTimers(); localStorage.clear(); list.mockReset().mockResolvedValue({ items: [] }) })
+beforeEach(() => { vi.useFakeTimers(); localStorage.clear(); list.mockReset().mockResolvedValue({ items: [] }); reloadCatalog.mockReset().mockResolvedValue([]) })
 afterEach(() => { wrapper?.unmount(); vi.useRealTimers(); localStorage.clear() })
 
 describe('channel monitor refresh interval', () => {
@@ -39,8 +40,11 @@ describe('channel monitor refresh interval', () => {
 
   it('starts automatic refresh for a first visit', async () => {
     wrapper = mountView(); await flushPromises()
+    expect(wrapper.find('channel-group-catalog-stub').exists()).toBe(false)
+    expect(reloadCatalog).toHaveBeenCalledTimes(1)
     await vi.advanceTimersByTimeAsync(120000)
     expect(list.mock.calls.length).toBeGreaterThan(1)
+    expect(reloadCatalog).toHaveBeenCalledTimes(1)
   })
 
   it('refreshes at the selected interval on successive automatic refreshes', async () => {
@@ -61,6 +65,7 @@ describe('channel monitor refresh interval', () => {
     await wrapper.get('.interval').trigger('click')
     await wrapper.get('.refresh').trigger('click'); await flushPromises()
     expect(list).toHaveBeenCalledTimes(2)
+    expect(reloadCatalog).toHaveBeenCalledTimes(2)
     await vi.advanceTimersByTimeAsync(119000)
     expect(list).toHaveBeenCalledTimes(2)
     await vi.advanceTimersByTimeAsync(1000)

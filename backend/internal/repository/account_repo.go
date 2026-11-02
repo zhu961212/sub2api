@@ -65,11 +65,12 @@ var schedulerNeutralExtraKeyPrefixes = []string{
 }
 
 var schedulerNeutralExtraKeys = map[string]struct{}{
-	"codex_usage_updated_at":     {},
-	"codex_credits_snapshot":     {},
-	"codex_referral_snapshot":    {},
-	"grok_billing_snapshot":      {},
-	"session_window_utilization": {},
+	service.ModelEvaluationResultsExtraKey: {},
+	"codex_usage_updated_at":               {},
+	"codex_credits_snapshot":               {},
+	"codex_referral_snapshot":              {},
+	"grok_billing_snapshot":                {},
+	"session_window_utilization":           {},
 }
 
 const postgresParameterBatchSize = 50000
@@ -129,6 +130,21 @@ func (r *accountRepository) Create(ctx context.Context, account *service.Account
 	if scoped := r.accountTransactionScope(ctx); scoped != r {
 		return scoped.Create(ctx, account)
 	}
+	if account != nil && account.IsOpenAIOAuth() && !account.IsShadow() && dbent.TxFromContext(ctx) == nil {
+		tx, err := r.client.Tx(ctx)
+		if err != nil && !errors.Is(err, dbent.ErrTxStarted) {
+			return err
+		}
+		if tx != nil {
+			defer func() { _ = tx.Rollback() }()
+			if err := r.Create(dbent.NewTxContext(ctx, tx), account); err != nil {
+				return err
+			}
+			return tx.Commit()
+		}
+		// A repository backed by an existing Ent transaction already owns the
+		// policy lock lifetime; continue in that transaction without nesting.
+	}
 	if err := createAccountRecord(ctx, r.client, account); err != nil {
 		return err
 	}
@@ -141,6 +157,9 @@ func (r *accountRepository) Create(ctx context.Context, account *service.Account
 func createAccountRecord(ctx context.Context, client *dbent.Client, account *service.Account) error {
 	if account == nil {
 		return service.ErrAccountNilInput
+	}
+	if err := inheritOpenAIDailyQuotaPolicy(ctx, client, account); err != nil {
+		return err
 	}
 
 	builder := client.Account.Create().
@@ -532,11 +551,21 @@ func (r *accountRepository) updateLockedAccount(
 	explicitRateSyncEnabled *bool,
 	explicitRateMultiplier *float64,
 ) (*dbent.Account, error) {
+	// Lock the policy before the account row, matching bulk policy updates.
+	if account.IsOpenAIOAuth() && !account.IsShadow() {
+		if _, err := client.ExecContext(ctx, `SELECT pg_advisory_xact_lock_shared(86420110)`); err != nil {
+			return nil, err
+		}
+	}
 	extra, err := lockAndMergeAccountProbeExtra(ctx, client, account, explicitProbeEnabled, explicitRateSyncEnabled)
 	if err != nil {
 		return nil, err
 	}
 	account.Extra = extra
+	if err := inheritOpenAIDailyQuotaPolicy(ctx, client, account); err != nil {
+		return nil, err
+	}
+	extra = account.Extra
 
 	schedulable := account.Schedulable
 	if account.Status == service.StatusError {
@@ -682,7 +711,10 @@ func lockAndMergeAccountProbeExtra(
 			extra -> 'opencode_go_usage_auto_refresh',
 			extra -> 'opencode_go_usage_snapshot',
 			extra -> 'grok_observed_models',
-			extra -> 'upstream_model_metadata'
+			extra -> 'upstream_model_metadata',
+			extra -> 'model_evaluation_results',
+			extra -> 'model_evaluation_pause',
+			schedulable
 		FROM accounts
 		WHERE id = $1 AND deleted_at IS NULL
 		FOR NO KEY UPDATE
@@ -713,6 +745,9 @@ func lockAndMergeAccountProbeExtra(
 		currentOpenCodeSnapshot        []byte
 		currentGrokObservedModels      []byte
 		currentUpstreamModelMetadata   []byte
+		currentModelEvaluationResults  []byte
+		currentModelEvaluationPause    []byte
+		currentSchedulable             bool
 	)
 	if err := rows.Scan(
 		&identityUnchanged,
@@ -729,6 +764,9 @@ func lockAndMergeAccountProbeExtra(
 		&currentOpenCodeSnapshot,
 		&currentGrokObservedModels,
 		&currentUpstreamModelMetadata,
+		&currentModelEvaluationResults,
+		&currentModelEvaluationPause,
+		&currentSchedulable,
 	); err != nil {
 		return nil, err
 	}
@@ -737,6 +775,11 @@ func lockAndMergeAccountProbeExtra(
 	}
 
 	extra := copyJSONMap(normalizeJSONMap(account.Extra))
+	// An ordinary edit is not an explicit resume action. Preserve an automatic
+	// quality pause committed after the admin loaded the edit snapshot.
+	if !currentSchedulable && len(currentModelEvaluationPause) > 0 && string(currentModelEvaluationPause) != "null" {
+		account.Schedulable = false
+	}
 	for _, key := range []string{
 		service.UpstreamBillingProbeEnabledExtraKey,
 		service.UpstreamBillingRateSyncEnabledExtraKey,
@@ -842,11 +885,14 @@ func lockAndMergeAccountProbeExtra(
 			}
 		}
 	}
-	// Grok 目录和能力 metadata 是同步写入的受管状态。普通更新在行锁内采用最新
-	// 数据库值，忽略表单旧值、缺键和注入。来源身份变化不删除已有成功快照。
+	// Observed model metadata and evaluation history are server-managed. Use
+	// the locked row so stale edit forms and lite-list summaries cannot replace
+	// newer observations or the complete saved artwork.
 	for key, raw := range map[string][]byte{
-		"grok_observed_models":                currentGrokObservedModels,
-		service.UpstreamModelMetadataExtraKey: currentUpstreamModelMetadata,
+		"grok_observed_models":                 currentGrokObservedModels,
+		service.UpstreamModelMetadataExtraKey:  currentUpstreamModelMetadata,
+		service.ModelEvaluationResultsExtraKey: currentModelEvaluationResults,
+		service.ModelEvaluationPauseExtraKey:   currentModelEvaluationPause,
 	} {
 		delete(extra, key)
 		value, ok, err := decodeAccountExtraJSON(raw)
@@ -892,6 +938,15 @@ func (r *accountRepository) UpdateCredentials(ctx context.Context, id int64, cre
 			defer func() { _ = tx.Rollback() }()
 			ctx = dbent.NewTxContext(ctx, tx)
 			client = tx.Client()
+		}
+	}
+	_, hasPlanType := credentials["plan_type"]
+	_, hasAccessToken := credentials["access_token"]
+	_, hasRefreshToken := credentials["refresh_token"]
+	refreshDailyQuotaPolicy := hasPlanType || hasAccessToken || hasRefreshToken
+	if refreshDailyQuotaPolicy {
+		if _, err := client.ExecContext(ctx, `SELECT pg_advisory_xact_lock_shared(86420110)`); err != nil {
+			return err
 		}
 	}
 	result, err := client.ExecContext(ctx, `
@@ -973,6 +1028,15 @@ func (r *accountRepository) UpdateCredentials(ctx context.Context, id int64, cre
 	}
 	if affected == 0 {
 		return service.ErrAccountNotFound
+	}
+	if refreshDailyQuotaPolicy {
+		policy, err := readOpenAIDailyQuotaPolicy(ctx, client)
+		if err != nil {
+			return err
+		}
+		if _, err := applyOpenAIDailyQuotaPolicySQL(ctx, client, policy, id); err != nil {
+			return err
+		}
 	}
 	if err := enqueueSchedulerOutbox(ctx, client, service.SchedulerOutboxEventAccountChanged, &id, nil, nil); err != nil {
 		return err
@@ -1149,6 +1213,11 @@ func (r *accountRepository) ListWithFilters(ctx context.Context, params paginati
 		Limit(params.Limit())
 	for _, order := range accountListOrder(params) {
 		accountsQuery = accountsQuery.Order(order)
+	}
+	if service.AccountListEvaluationSummariesRequested(ctx) {
+		// Applied after Count, only to this list SELECT. The selector extension
+		// replaces one JSONB column while preserving the Ent row shape.
+		accountsQuery = accountsQuery.Where(projectAccountListEvaluationExtra)
 	}
 
 	accounts, err := accountsQuery.All(ctx)
@@ -2731,10 +2800,9 @@ func (r *accountRepository) SetSchedulable(ctx context.Context, id int64, schedu
 	if scoped := r.accountTransactionScope(ctx); scoped != r {
 		return scoped.SetSchedulable(ctx, id, schedulable)
 	}
-	_, err := r.client.Account.Update().
-		Where(dbaccount.IDEQ(id)).
-		SetSchedulable(schedulable).
-		Save(ctx)
+	_, err := r.sql.ExecContext(ctx, `UPDATE accounts SET schedulable = $1,
+		extra = COALESCE(extra, '{}'::jsonb) - 'model_evaluation_pause',
+		updated_at = NOW() WHERE id = $2 AND deleted_at IS NULL`, schedulable, id)
 	if err != nil {
 		return err
 	}
@@ -2804,7 +2872,8 @@ func (r *accountRepository) UpdateExtra(ctx context.Context, id int64, updates m
 	}
 
 	clearProbeSnapshot := upstreamBillingProbeExplicitlyDisabled(updates) || upstreamBillingProbeSnapshotClearRequested(updates)
-	durableSchedulerChange := shouldEnqueueSchedulerOutboxForExtraUpdates(updates) || clearProbeSnapshot
+	affectsDailyQuotaPolicy := bulkUpdateAffectsOpenAIDailyQuota(service.AccountBulkUpdate{Extra: updates})
+	durableSchedulerChange := shouldEnqueueSchedulerOutboxForExtraUpdates(updates) || clearProbeSnapshot || affectsDailyQuotaPolicy
 	baseCtx := ctx
 	contextTx := dbent.TxFromContext(ctx)
 	client := clientFromContext(ctx, r.client)
@@ -2828,6 +2897,21 @@ func (r *accountRepository) UpdateExtra(ctx context.Context, id int64, updates m
 	if service.ShouldEnsureCodexFingerprintSeedForExtraUpdates(updates) {
 		extraExpression = ensureCodexFingerprintSeedSQL(extraExpression)
 	}
+	var dailyQuotaPolicy *service.OpenAIDailyQuotaPolicy
+	if affectsDailyQuotaPolicy {
+		// Incremental edits (including OAuth reauthorization) must obey the same
+		// policy-before-row lock order and managed settings as full/bulk edits.
+		if _, err := client.ExecContext(ctx, `SELECT pg_advisory_xact_lock_shared(86420110)`); err != nil {
+			return err
+		}
+		policy, err := readOpenAIDailyQuotaPolicy(ctx, client)
+		if err != nil {
+			return err
+		}
+		if policy.Enabled {
+			dailyQuotaPolicy = &policy
+		}
+	}
 	result, err := client.ExecContext(
 		ctx,
 		"UPDATE accounts SET extra = "+extraExpression+", updated_at = NOW() WHERE id = $2 AND deleted_at IS NULL",
@@ -2844,6 +2928,11 @@ func (r *accountRepository) UpdateExtra(ctx context.Context, id int64, updates m
 	}
 	if affected == 0 {
 		return service.ErrAccountNotFound
+	}
+	if dailyQuotaPolicy != nil {
+		if _, err := applyOpenAIDailyQuotaPolicySQL(ctx, client, *dailyQuotaPolicy, id); err != nil {
+			return err
+		}
 	}
 	if durableSchedulerChange {
 		if err := enqueueSchedulerOutbox(ctx, client, service.SchedulerOutboxEventAccountChanged, &id, nil, nil); err != nil {
@@ -3189,7 +3278,8 @@ func (r *accountRepository) BulkUpdate(ctx context.Context, ids []int64, updates
 				" AND COALESCE(btrim("+credentialPlaceholder+"::jsonb ->> 'account_mode') <> 'zen', true) IS NOT TRUE")
 	}
 
-	if len(updates.Extra) > 0 || len(ollamaGroupIdentityChanges) > 0 || len(opencodeGroupIdentityChanges) > 0 || ollamaProxyIdentityChanged != "" || updates.EnsureCodexFingerprintSeed {
+	clearEvaluationPause := updates.Schedulable != nil
+	if len(updates.Extra) > 0 || len(ollamaGroupIdentityChanges) > 0 || len(opencodeGroupIdentityChanges) > 0 || ollamaProxyIdentityChanged != "" || updates.EnsureCodexFingerprintSeed || clearEvaluationPause {
 		extraExpression := "COALESCE(extra, '{}'::jsonb)"
 		if len(updates.Extra) > 0 {
 			payload, err := json.Marshal(updates.Extra)
@@ -3272,6 +3362,9 @@ func (r *accountRepository) BulkUpdate(ctx context.Context, ids []int64, updates
 		if updates.EnsureCodexFingerprintSeed {
 			extraExpression = ensureCodexFingerprintSeedSQL(extraExpression)
 		}
+		if clearEvaluationPause {
+			extraExpression = "(" + extraExpression + ") - 'model_evaluation_pause'"
+		}
 		setClauses = append(setClauses, "extra = "+extraExpression)
 	}
 
@@ -3309,6 +3402,21 @@ func (r *accountRepository) BulkUpdate(ctx context.Context, ids []int64, updates
 		}
 	}
 
+	var dailyQuotaPolicy *service.OpenAIDailyQuotaPolicy
+	if bulkUpdateAffectsOpenAIDailyQuota(updates) {
+		// Acquire before the UPDATE takes row locks, matching policy saves and
+		// single-account edits. Reapply the policy before committing this edit.
+		if _, err := exec.ExecContext(ctx, `SELECT pg_advisory_xact_lock_shared(86420110)`); err != nil {
+			return 0, err
+		}
+		policy, err := readOpenAIDailyQuotaPolicy(ctx, exec)
+		if err != nil {
+			return 0, err
+		}
+		if policy.Enabled {
+			dailyQuotaPolicy = &policy
+		}
+	}
 	result, err := exec.ExecContext(ctx, query, args...)
 	if err != nil {
 		return 0, err
@@ -3332,6 +3440,11 @@ func (r *accountRepository) BulkUpdate(ctx context.Context, ids []int64, updates
 		}
 	}
 	if rows > 0 {
+		if dailyQuotaPolicy != nil {
+			if _, err := applyOpenAIDailyQuotaPolicyToIDsSQL(ctx, exec, *dailyQuotaPolicy, ids); err != nil {
+				return 0, err
+			}
+		}
 		payload := map[string]any{"account_ids": ids}
 		if err := enqueueSchedulerOutbox(ctx, exec, service.SchedulerOutboxEventAccountBulkChanged, nil, nil, payload); err != nil {
 			return 0, err
@@ -3915,11 +4028,24 @@ func (r *accountRepository) ListDueUpstreamBillingProbeAccounts(ctx context.Cont
 // nowUTC is a SQL expression to generate a UTC RFC3339 timestamp string.
 const nowUTC = `to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`
 
-// dailyExpiredExpr is a SQL expression that evaluates to TRUE when daily quota period has expired.
-// Supports both rolling (24h from start) and fixed (pre-computed reset_at) modes.
+const fiveHourExpiredExpr = `(COALESCE((extra->>'quota_5h_start')::timestamptz, '1970-01-01'::timestamptz)
+	+ INTERVAL '5 hours' <= NOW())`
+
+// Match Account.isFixedDailyPeriodExpired: the configured local reset boundary
+// determines the active period. Stored reset_at is derived display metadata and
+// can be ahead of a stale/missing start after a configuration change.
+const dailyResetTimezoneExpr = `COALESCE(extra->>'quota_daily_reset_timezone', extra->>'quota_reset_timezone', 'UTC')`
+const dailyResetLocalDayExpr = `date_trunc('day', NOW() AT TIME ZONE ` + dailyResetTimezoneExpr + `)`
+const dailyResetLocalHourExpr = `(COALESCE((extra->>'quota_daily_reset_hour')::int, 0) || ' hours')::interval`
+const dailyTodayResetAtExpr = `((` + dailyResetLocalDayExpr + ` + ` + dailyResetLocalHourExpr + `) AT TIME ZONE ` + dailyResetTimezoneExpr + `)`
+const lastDailyResetAtExpr = `(CASE WHEN NOW() < ` + dailyTodayResetAtExpr + `
+	THEN (` + dailyResetLocalDayExpr + ` - INTERVAL '1 day' + ` + dailyResetLocalHourExpr + `) AT TIME ZONE ` + dailyResetTimezoneExpr + `
+	ELSE ` + dailyTodayResetAtExpr + ` END)`
+
+// dailyExpiredExpr supports rolling (24h from start) and fixed local-day modes.
 const dailyExpiredExpr = `(
 	CASE WHEN COALESCE(extra->>'quota_daily_reset_mode', 'rolling') = 'fixed'
-	THEN NOW() >= COALESCE((extra->>'quota_daily_reset_at')::timestamptz, '1970-01-01'::timestamptz)
+	THEN COALESCE((extra->>'quota_daily_start')::timestamptz, '1970-01-01'::timestamptz) < ` + lastDailyResetAtExpr + `
 	ELSE COALESCE((extra->>'quota_daily_start')::timestamptz, '1970-01-01'::timestamptz)
 		+ '24 hours'::interval <= NOW()
 	END
@@ -3940,22 +4066,9 @@ const weeklyExpiredExpr = `(
 const nextDailyResetAtExpr = `(
 	CASE WHEN COALESCE(extra->>'quota_daily_reset_mode', 'rolling') = 'fixed'
 	THEN to_char((
-		-- Compute today's reset point in the configured timezone, then pick next future one
-		CASE WHEN NOW() >= (
-			date_trunc('day', NOW() AT TIME ZONE COALESCE(extra->>'quota_reset_timezone', 'UTC'))
-			+ (COALESCE((extra->>'quota_daily_reset_hour')::int, 0) || ' hours')::interval
-		) AT TIME ZONE COALESCE(extra->>'quota_reset_timezone', 'UTC')
-		-- NOW() is at or past today's reset point → next reset is tomorrow
-		THEN (
-			date_trunc('day', NOW() AT TIME ZONE COALESCE(extra->>'quota_reset_timezone', 'UTC'))
-			+ (COALESCE((extra->>'quota_daily_reset_hour')::int, 0) || ' hours')::interval
-			+ '1 day'::interval
-		) AT TIME ZONE COALESCE(extra->>'quota_reset_timezone', 'UTC')
-		-- NOW() is before today's reset point → next reset is today
-		ELSE (
-			date_trunc('day', NOW() AT TIME ZONE COALESCE(extra->>'quota_reset_timezone', 'UTC'))
-			+ (COALESCE((extra->>'quota_daily_reset_hour')::int, 0) || ' hours')::interval
-		) AT TIME ZONE COALESCE(extra->>'quota_reset_timezone', 'UTC')
+		CASE WHEN NOW() >= ` + dailyTodayResetAtExpr + `
+		THEN (` + dailyResetLocalDayExpr + ` + INTERVAL '1 day' + ` + dailyResetLocalHourExpr + `) AT TIME ZONE ` + dailyResetTimezoneExpr + `
+		ELSE ` + dailyTodayResetAtExpr + `
 		END
 	) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
 	ELSE NULL END
@@ -4002,72 +4115,37 @@ const nextWeeklyResetAtExpr = `(
 	ELSE NULL END
 )`
 
-// IncrementQuotaUsed 原子递增账号的配额用量（总/日/周三个维度）
-// 日/周额度在周期过期时自动重置为 0 再递增。
-// 支持滚动窗口（rolling）和固定时间（fixed）两种重置模式。
+// IncrementQuotaUsed 原子递增账号的总/5小时/日/周配额用量。
+// 5小时额度从首次计费起算；日/周额度也支持固定时间重置。
+// 各周期过期后从本次金额重新计数，不重置其它周期的用量。
 func (r *accountRepository) IncrementQuotaUsed(ctx context.Context, id int64, amount float64) error {
-	rows, err := r.sql.QueryContext(ctx,
-		`UPDATE accounts SET extra = (
-			COALESCE(extra, '{}'::jsonb)
-			-- 总额度：始终递增
-			|| jsonb_build_object('quota_used', COALESCE((extra->>'quota_used')::numeric, 0) + $1)
-			-- 日额度：仅在 quota_daily_limit > 0 时处理
-			|| CASE WHEN COALESCE((extra->>'quota_daily_limit')::numeric, 0) > 0 THEN
-				jsonb_build_object(
-					'quota_daily_used',
-					CASE WHEN `+dailyExpiredExpr+`
-					THEN $1
-					ELSE COALESCE((extra->>'quota_daily_used')::numeric, 0) + $1 END,
-					'quota_daily_start',
-					CASE WHEN `+dailyExpiredExpr+`
-					THEN `+nowUTC+`
-					ELSE COALESCE(extra->>'quota_daily_start', `+nowUTC+`) END
-				)
-				-- 固定模式重置时更新下次重置时间
-				|| CASE WHEN `+dailyExpiredExpr+` AND `+nextDailyResetAtExpr+` IS NOT NULL
-				   THEN jsonb_build_object('quota_daily_reset_at', `+nextDailyResetAtExpr+`)
-				   ELSE '{}'::jsonb END
-			ELSE '{}'::jsonb END
-			-- 周额度：仅在 quota_weekly_limit > 0 时处理
-			|| CASE WHEN COALESCE((extra->>'quota_weekly_limit')::numeric, 0) > 0 THEN
-				jsonb_build_object(
-					'quota_weekly_used',
-					CASE WHEN `+weeklyExpiredExpr+`
-					THEN $1
-					ELSE COALESCE((extra->>'quota_weekly_used')::numeric, 0) + $1 END,
-					'quota_weekly_start',
-					CASE WHEN `+weeklyExpiredExpr+`
-					THEN `+nowUTC+`
-					ELSE COALESCE(extra->>'quota_weekly_start', `+nowUTC+`) END
-				)
-				-- 固定模式重置时更新下次重置时间
-				|| CASE WHEN `+weeklyExpiredExpr+` AND `+nextWeeklyResetAtExpr+` IS NOT NULL
-				   THEN jsonb_build_object('quota_weekly_reset_at', `+nextWeeklyResetAtExpr+`)
-				   ELSE '{}'::jsonb END
-			ELSE '{}'::jsonb END
-		), updated_at = NOW()
-		WHERE id = $2 AND deleted_at IS NULL
-		RETURNING
-			COALESCE((extra->>'quota_used')::numeric, 0),
-			COALESCE((extra->>'quota_limit')::numeric, 0)`,
-		amount, id)
+	// Match transactional billing: free usage must not start a quota period.
+	if amount <= 0 {
+		return nil
+	}
+	// Share the exact period rules and counter update with transactional billing.
+	rows, err := r.sql.QueryContext(ctx, accountQuotaIncrementSQLs[accountQuotaIncrementSQLIndex(true, true)], amount, id)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = rows.Close() }()
 
-	var newUsed, limit float64
+	var newUsed, limit, dailyUsed, dailyLimit, weeklyUsed, weeklyLimit, fiveHourUsed, fiveHourLimit float64
 	if rows.Next() {
-		if err := rows.Scan(&newUsed, &limit); err != nil {
+		if err := rows.Scan(&newUsed, &limit, &dailyUsed, &dailyLimit, &weeklyUsed, &weeklyLimit, &fiveHourUsed, &fiveHourLimit); err != nil {
 			return err
 		}
 	}
 	if err := rows.Err(); err != nil {
 		return err
 	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
 
 	// 任一维度配额刚超限时触发调度快照刷新
-	if limit > 0 && newUsed >= limit && (newUsed-amount) < limit {
+	crossed := func(used, limit float64) bool { return limit > 0 && used >= limit && (used-amount) < limit }
+	if crossed(newUsed, limit) || crossed(dailyUsed, dailyLimit) || crossed(weeklyUsed, weeklyLimit) || crossed(fiveHourUsed, fiveHourLimit) {
 		if err := enqueueSchedulerOutbox(ctx, r.sql, service.SchedulerOutboxEventAccountChanged, &id, nil, nil); err != nil {
 			logger.LegacyPrintf("repository.account", "[SchedulerOutbox] enqueue quota exceeded failed: account=%d err=%v", id, err)
 		}
@@ -4081,8 +4159,8 @@ func (r *accountRepository) ResetQuotaUsedAndClearRateLimitCooldown(ctx context.
 	result, err := r.sql.ExecContext(ctx,
 		`UPDATE accounts SET extra = (
 			COALESCE(extra, '{}'::jsonb)
-			|| '{"quota_used": 0, "quota_daily_used": 0, "quota_weekly_used": 0}'::jsonb
-		) - 'quota_daily_start' - 'quota_weekly_start' - 'quota_daily_reset_at' - 'quota_weekly_reset_at',
+			|| '{"quota_used": 0, "quota_5h_used": 0, "quota_daily_used": 0, "quota_weekly_used": 0}'::jsonb
+		) - 'quota_5h_start' - 'quota_daily_start' - 'quota_weekly_start' - 'quota_daily_reset_at' - 'quota_weekly_reset_at',
 		rate_limited_at = NULL, rate_limit_reset_at = NULL, updated_at = NOW()
 		WHERE id = $1 AND deleted_at IS NULL`,
 		id)

@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -635,6 +636,89 @@ func TestOpenAIGatewayServiceRecordUsage_DeepSeekAccountStatsUsesRequestPricingA
 					"account cost must use the upstream model and historical PricingAt")
 			})
 		}
+	}
+}
+
+func TestOpenAIGatewayServiceRecordUsage_DailyQuotaUsesAccountPricing(t *testing.T) {
+	for _, simpleMode := range []bool{false, true} {
+		t.Run(fmt.Sprint("simple_mode_", simpleMode), func(t *testing.T) {
+			usageRepo := &openAIRecordUsageLogRepoStub{inserted: true}
+			billingRepo := &openAIRecordUsageBillingRepoStub{result: &UsageBillingApplyResult{Applied: false}}
+			svc := newOpenAIRecordUsageServiceWithBillingRepoForTest(usageRepo, billingRepo, &openAIRecordUsageUserRepoStub{}, &openAIRecordUsageSubRepoStub{}, nil)
+			if simpleMode {
+				svc.cfg.RunMode = config.RunModeSimple
+			}
+			groupID := int64(18)
+			customerPrice, accountPrice, accountMultiplier := 5.0, 2.0, 1.5
+			cache := newEmptyChannelCache()
+			cache.channelByGroupID[groupID] = &Channel{ID: 1, Status: StatusActive, AccountStatsPricingRules: []AccountStatsPricingRule{{
+				GroupIDs: []int64{groupID},
+				Pricing:  []ChannelModelPricing{{Models: []string{"gpt-5.1"}, InputPrice: &accountPrice}},
+			}}}
+			cache.groupPlatform[groupID] = PlatformOpenAI
+			cache.loadedAt = time.Now()
+			svc.channelService = &ChannelService{}
+			svc.channelService.cache.Store(cache)
+			svc.resolver = NewModelPricingResolver(svc.channelService, svc.billingService)
+			err := svc.RecordUsage(context.Background(), &OpenAIRecordUsageInput{
+				Result: &OpenAIForwardResult{RequestID: "account-daily-pricing", Model: "gpt-5.1", Usage: OpenAIUsage{InputTokens: 1}},
+				APIKey: &APIKey{ID: 2, GroupID: &groupID, Group: &Group{ID: groupID, Platform: PlatformOpenAI, RateMultiplier: 3,
+					ModelPricing: []ChannelModelPricing{{Models: []string{"gpt-5.1"}, InputPrice: &customerPrice}},
+				}},
+				User: &User{ID: 1},
+				Account: &Account{ID: 3, Platform: PlatformOpenAI, Type: AccountTypeOAuth, RateMultiplier: &accountMultiplier,
+					Extra: map[string]any{"quota_daily_limit": 20.0}},
+			})
+			require.NoError(t, err)
+			require.NotNil(t, usageRepo.lastLog)
+			require.Equal(t, 5.0, usageRepo.lastLog.TotalCost)
+			require.Equal(t, 15.0, usageRepo.lastLog.ActualCost)
+			require.NotNil(t, usageRepo.lastLog.AccountStatsCost)
+			require.Equal(t, 2.0, *usageRepo.lastLog.AccountStatsCost)
+			require.NotNil(t, billingRepo.lastCmd)
+			require.Equal(t, 3.0, billingRepo.lastCmd.AccountQuotaCost)
+			require.True(t, billingRepo.lastCmd.AccountQuotaHasDailyLimit)
+			if simpleMode {
+				require.Zero(t, billingRepo.lastCmd.BalanceCost)
+			} else {
+				require.Equal(t, 15.0, billingRepo.lastCmd.BalanceCost)
+			}
+		})
+	}
+}
+
+func TestOpenAIGatewayServiceRecordUsage_WebSocketPicksUpNewFiveHourBudget(t *testing.T) {
+	for _, shadow := range []bool{false, true} {
+		t.Run(fmt.Sprint("shadow_", shadow), func(t *testing.T) {
+			parent := &Account{ID: 3, Platform: PlatformOpenAI, Type: AccountTypeOAuth,
+				Extra: map[string]any{"quota_5h_limit": 5.0}}
+			selected := &Account{ID: 3, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+			if shadow {
+				selected.ID, selected.ParentAccountID = 4, &parent.ID
+			}
+			accountRepo := &openAIRecordUsageAccountRepoStub{account: parent}
+			usageRepo := &openAIRecordUsageLogRepoStub{inserted: true}
+			billingRepo := &openAIRecordUsageBillingRepoStub{result: &UsageBillingApplyResult{Applied: false}}
+			svc := newOpenAIRecordUsageServiceWithBillingRepoForTest(usageRepo, billingRepo, &openAIRecordUsageUserRepoStub{}, &openAIRecordUsageSubRepoStub{}, nil)
+			svc.cfg.RunMode = config.RunModeSimple
+			svc.accountRepo = accountRepo
+			require.False(t, selected.HasAnyQuotaLimit(), "the forwarding snapshot predates the policy change")
+			err := svc.RecordUsage(context.Background(), &OpenAIRecordUsageInput{
+				Result:  &OpenAIForwardResult{RequestID: "ws-new-budget", OpenAIWSMode: true, Model: "gpt-5.1", Usage: OpenAIUsage{InputTokens: 100}},
+				APIKey:  &APIKey{ID: 2},
+				User:    &User{ID: 1},
+				Account: selected,
+			})
+			require.NoError(t, err)
+			require.Positive(t, accountRepo.calls)
+			require.NotNil(t, billingRepo.lastCmd)
+			require.Positive(t, billingRepo.lastCmd.AccountQuotaCost, "current DB quota settings must control billing for existing connections")
+			require.Zero(t, billingRepo.lastCmd.BalanceCost)
+			if shadow {
+				require.Equal(t, parent.ID, billingRepo.lastCmd.AccountQuotaAccountID)
+			}
+			require.False(t, selected.HasAnyQuotaLimit(), "the forwarding snapshot remains immutable")
+		})
 	}
 }
 

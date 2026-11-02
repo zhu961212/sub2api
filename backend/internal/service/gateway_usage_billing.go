@@ -77,16 +77,19 @@ type postUsageBillingParams struct {
 	User                  *User
 	APIKey                *APIKey
 	Account               *Account
+	QuotaAccount          *Account // Optional credential parent owning the local spending budget.
 	Subscription          *UserSubscription
 	RequestPayloadHash    string
 	IsSubscriptionBill    bool
 	AccountRateMultiplier float64
+	AccountStatsCost      *float64 // Account pricing before its multiplier; nil falls back to TotalCost.
 	APIKeyService         APIKeyQuotaUpdater
 	Platform              string // 来自 APIKey 关联 Group 的平台标识
 	// SimpleModeKeyRateLimitOnly opts the request into the simple-mode billing
 	// path that records only API-key 5h/1d/7d window usage. It must not trigger
 	// balance, subscription, account, platform, or lifetime-key-quota effects.
 	SimpleModeKeyRateLimitOnly bool
+	SimpleModeAccountQuota     bool // OpenAI local budgets remain enforced without billing users.
 }
 
 var ErrSimpleModeKeyRateLimitBillingUnavailable = errors.New("simple mode api key rate-limit billing unavailable")
@@ -137,7 +140,28 @@ func (p *postUsageBillingParams) shouldUpdateRateLimits() bool {
 }
 
 func (p *postUsageBillingParams) shouldUpdateAccountQuota() bool {
-	return p.Cost.TotalCost > 0 && p.Account.SupportsAccountQuota() && p.Account.HasAnyQuotaLimit()
+	account := p.accountForQuota()
+	return p.accountQuotaBaseCost() > 0 && account.SupportsAccountQuota() && account.HasAnyQuotaLimit()
+}
+
+func (p *postUsageBillingParams) accountQuotaBaseCost() float64 {
+	if p.AccountStatsCost != nil {
+		return *p.AccountStatsCost
+	}
+	return p.Cost.TotalCost
+}
+
+// Account budgets use the same cost as account usage statistics, independently
+// of the customer's model pricing and group/user billing multiplier.
+func (p *postUsageBillingParams) accountQuotaCost() float64 {
+	return p.accountQuotaBaseCost() * p.AccountRateMultiplier
+}
+
+func (p *postUsageBillingParams) accountForQuota() *Account {
+	if p.QuotaAccount != nil {
+		return p.QuotaAccount
+	}
+	return p.Account
 }
 
 // postUsageBilling is the legacy fallback billing path used when the unified
@@ -182,9 +206,10 @@ func postUsageBilling(ctx context.Context, p *postUsageBillingParams, deps *bill
 	}
 
 	if p.shouldUpdateAccountQuota() {
-		accountCost := cost.TotalCost * p.AccountRateMultiplier
-		if err := deps.accountRepo.IncrementQuotaUsed(billingCtx, p.Account.ID, accountCost); err != nil {
-			slog.Error("increment account quota used failed", "account_id", p.Account.ID, "cost", accountCost, "error", err)
+		quotaAccount := p.accountForQuota()
+		accountCost := p.accountQuotaCost()
+		if err := deps.accountRepo.IncrementQuotaUsed(billingCtx, quotaAccount.ID, accountCost); err != nil {
+			slog.Error("increment account quota used failed", "account_id", quotaAccount.ID, "cost", accountCost, "error", err)
 		}
 	}
 
@@ -297,6 +322,7 @@ func buildUsageBillingCommand(requestID string, usageLog *UsageLog, p *postUsage
 		UserID:             p.User.ID,
 		AccountID:          p.Account.ID,
 		AccountType:        p.Account.Type,
+		AccountPlatform:    p.Account.Platform,
 		RequestPayloadHash: strings.TrimSpace(p.RequestPayloadHash),
 	}
 	if usageLog != nil {
@@ -318,9 +344,12 @@ func buildUsageBillingCommand(requestID string, usageLog *UsageLog, p *postUsage
 		}
 	}
 
-	if p.SimpleModeKeyRateLimitOnly {
-		if p.Cost.ActualCost > 0 && p.APIKey.HasRateLimits() {
+	if p.SimpleModeKeyRateLimitOnly || p.SimpleModeAccountQuota {
+		if p.SimpleModeKeyRateLimitOnly && p.Cost.ActualCost > 0 && p.APIKey.HasRateLimits() {
 			cmd.APIKeyRateLimitCost = p.Cost.ActualCost
+		}
+		if p.SimpleModeAccountQuota {
+			p.populateAccountQuotaCommand(cmd)
 		}
 		cmd.Normalize()
 		return cmd
@@ -343,14 +372,23 @@ func buildUsageBillingCommand(requestID string, usageLog *UsageLog, p *postUsage
 	if p.shouldUpdateRateLimits() {
 		cmd.APIKeyRateLimitCost = p.Cost.ActualCost
 	}
-	if p.shouldUpdateAccountQuota() {
-		cmd.AccountQuotaCost = p.Cost.TotalCost * p.AccountRateMultiplier
-		cmd.AccountQuotaHasDailyLimit = p.Account.GetQuotaDailyLimit() > 0
-		cmd.AccountQuotaHasWeeklyLimit = p.Account.GetQuotaWeeklyLimit() > 0
-	}
+	p.populateAccountQuotaCommand(cmd)
 
 	cmd.Normalize()
 	return cmd
+}
+
+func (p *postUsageBillingParams) populateAccountQuotaCommand(cmd *UsageBillingCommand) {
+	if p.shouldUpdateAccountQuota() {
+		quotaAccount := p.accountForQuota()
+		cmd.AccountQuotaCost = p.accountQuotaCost()
+		if quotaAccount.ID != p.Account.ID {
+			cmd.AccountQuotaAccountID = quotaAccount.ID
+		}
+		cmd.AccountQuotaHasDailyLimit = quotaAccount.GetQuotaDailyLimit() > 0
+		cmd.AccountQuotaHasWeeklyLimit = quotaAccount.GetQuotaWeeklyLimit() > 0
+	}
+
 }
 
 func applyUsageBilling(ctx context.Context, requestID string, usageLog *UsageLog, p *postUsageBillingParams, deps *billingDeps, repo UsageBillingRepository) (bool, error) {
@@ -360,7 +398,7 @@ func applyUsageBilling(ctx context.Context, requestID string, usageLog *UsageLog
 
 	cmd := buildUsageBillingCommand(requestID, usageLog, p)
 	if cmd == nil || cmd.RequestID == "" || repo == nil {
-		if p.SimpleModeKeyRateLimitOnly {
+		if p.SimpleModeKeyRateLimitOnly || p.SimpleModeAccountQuota {
 			return false, ErrSimpleModeKeyRateLimitBillingUnavailable
 		}
 		// The legacy path is only a fallback for standard billing. Simple mode
@@ -381,6 +419,7 @@ func applyUsageBilling(ctx context.Context, requestID string, usageLog *UsageLog
 		deps.deferredService.ScheduleLastUsedUpdate(p.Account.ID)
 		return false, nil
 	}
+	syncAccountQuotaCache(billingCtx, p, deps, result)
 
 	if result.APIKeyQuotaExhausted {
 		if invalidator, ok := p.APIKeyService.(apiKeyAuthCacheInvalidator); ok && p.APIKey != nil && p.APIKey.Key != "" {
@@ -392,12 +431,35 @@ func applyUsageBilling(ctx context.Context, requestID string, usageLog *UsageLog
 	return true, nil
 }
 
+// The transactional outbox remains the durable fallback, but waiting for its
+// next poll leaves cached parent budgets usable after their limit was reached.
+func syncAccountQuotaCache(ctx context.Context, p *postUsageBillingParams, deps *billingDeps, result *UsageBillingApplyResult) {
+	if deps.schedulerSnapshot == nil || deps.accountRepo == nil || result == nil || result.QuotaState == nil {
+		return
+	}
+	state := result.QuotaState
+	amount := QuantizeUsageBillingAmount(p.accountQuotaCost())
+	crossed := func(used, limit float64) bool { return limit > 0 && used >= limit && used-amount < limit }
+	if !crossed(state.TotalUsed, state.TotalLimit) && !crossed(state.DailyUsed, state.DailyLimit) &&
+		!crossed(state.WeeklyUsed, state.WeeklyLimit) && !crossed(state.FiveHourUsed, state.FiveHourLimit) {
+		return
+	}
+	accountID := p.accountForQuota().ID
+	latest, err := deps.accountRepo.GetByID(ctx, accountID)
+	if err == nil && latest != nil {
+		err = deps.schedulerSnapshot.UpdateAccountInCache(ctx, latest)
+	}
+	if err != nil {
+		slog.Warn("refresh account quota scheduling cache failed", "account_id", accountID, "error", err)
+	}
+}
+
 func finalizePostUsageBilling(ctx context.Context, p *postUsageBillingParams, deps *billingDeps, result *UsageBillingApplyResult) {
 	if p == nil || p.Cost == nil || deps == nil {
 		return
 	}
 
-	if p.SimpleModeKeyRateLimitOnly {
+	if p.SimpleModeKeyRateLimitOnly || p.SimpleModeAccountQuota {
 		// Simple-mode key windows are DB-authoritative during preflight. Clear
 		// any Redis snapshot after the committed increment as a best-effort aid
 		// when switching back to standard mode. Enforcement here never relies on
@@ -408,6 +470,9 @@ func finalizePostUsageBilling(ctx context.Context, p *postUsageBillingParams, de
 			}
 		}
 		deps.deferredService.ScheduleLastUsedUpdate(p.Account.ID)
+		if p.SimpleModeAccountQuota {
+			go notifyAccountQuota(p, deps, result)
+		}
 		return
 	}
 
@@ -543,17 +608,18 @@ func notifyAccountQuota(p *postUsageBillingParams, deps *billingDeps, result *Us
 			slog.Error("panic in notifyAccountQuota", "recover", r)
 		}
 	}()
-	if p.Cost.TotalCost <= 0 || p.Account == nil || !p.Account.SupportsAccountQuota() || !p.Account.HasAnyQuotaLimit() || deps.balanceNotifyService == nil {
+	account := p.accountForQuota()
+	if p.accountQuotaBaseCost() <= 0 || !account.SupportsAccountQuota() || !account.HasAnyQuotaLimit() || deps.balanceNotifyService == nil {
 		slog.Debug("notifyAccountQuota: skipped",
 			"total_cost", p.Cost.TotalCost,
-			"account_nil", p.Account == nil,
-			"supports_account_quota", p.Account != nil && p.Account.SupportsAccountQuota(),
-			"has_quota_limit", p.Account != nil && p.Account.HasAnyQuotaLimit(),
+			"account_nil", account == nil,
+			"supports_account_quota", account.SupportsAccountQuota(),
+			"has_quota_limit", account != nil && account.HasAnyQuotaLimit(),
 			"service_nil", deps.balanceNotifyService == nil,
 		)
 		return
 	}
-	accountCost := p.Cost.TotalCost * p.AccountRateMultiplier
+	accountCost := p.accountQuotaCost()
 	var quotaState *AccountQuotaState
 	if result != nil {
 		quotaState = result.QuotaState
@@ -563,11 +629,11 @@ func notifyAccountQuota(p *postUsageBillingParams, deps *billingDeps, result *Us
 		}
 	}
 	slog.Debug("notifyAccountQuota: calling CheckAccountQuotaAfterIncrement",
-		"account_id", p.Account.ID,
+		"account_id", account.ID,
 		"account_cost", accountCost,
 		"has_quota_state", quotaState != nil,
 	)
-	deps.balanceNotifyService.CheckAccountQuotaAfterIncrement(context.Background(), p.Account, accountCost, quotaState)
+	deps.balanceNotifyService.CheckAccountQuotaAfterIncrement(context.Background(), account, accountCost, quotaState)
 }
 
 func detachedBillingContext(ctx context.Context) (context.Context, context.CancelFunc) {
@@ -603,6 +669,7 @@ type billingDeps struct {
 	billingCacheService   *BillingCacheService
 	deferredService       *DeferredService
 	balanceNotifyService  *BalanceNotifyService
+	schedulerSnapshot     *SchedulerSnapshotService
 	userPlatformQuotaRepo UserPlatformQuotaRepository
 	cfg                   *config.Config
 }
@@ -615,6 +682,7 @@ func (s *GatewayService) billingDeps() *billingDeps {
 		billingCacheService:   s.billingCacheService,
 		deferredService:       s.deferredService,
 		balanceNotifyService:  s.balanceNotifyService,
+		schedulerSnapshot:     s.schedulerSnapshot,
 		userPlatformQuotaRepo: s.userPlatformQuotaRepo,
 		cfg:                   s.cfg,
 	}
@@ -889,6 +957,7 @@ func (s *GatewayService) recordUsageCore(ctx context.Context, input *recordUsage
 		RequestPayloadHash:         resolveUsageBillingPayloadFingerprint(ctx, input.RequestPayloadHash),
 		IsSubscriptionBill:         isSubscriptionBilling && !simpleModeKeyRateLimitOnly,
 		AccountRateMultiplier:      accountRateMultiplier,
+		AccountStatsCost:           usageLog.AccountStatsCost,
 		APIKeyService:              input.APIKeyService,
 		Platform:                   quotaPlatform,
 		SimpleModeKeyRateLimitOnly: simpleModeKeyRateLimitOnly,

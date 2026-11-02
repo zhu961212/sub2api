@@ -50,6 +50,7 @@ func TestScopedAdminReviewRecoveryCommitBoundary(t *testing.T) {
 			blocker := &scopedRecoveryReviewBlocker{}
 			admin := &adminServiceImpl{accountRepo: repo, entClient: client, runtimeBlocker: blocker}
 			mock.ExpectBegin()
+			mock.ExpectExec(`SELECT pg_advisory_xact_lock_shared\(86420110\)`).WillReturnResult(sqlmock.NewResult(0, 1))
 			mock.ExpectExec(`SELECT pg_advisory_xact_lock`).WithArgs(int64(31)).WillReturnResult(sqlmock.NewResult(0, 1))
 			mock.ExpectExec(`SELECT id FROM accounts`).WithArgs(int64(31)).WillReturnResult(sqlmock.NewResult(0, 1))
 			mock.ExpectExec(`SELECT account_id FROM account_groups`).WithArgs(int64(31)).WillReturnResult(sqlmock.NewResult(0, 1))

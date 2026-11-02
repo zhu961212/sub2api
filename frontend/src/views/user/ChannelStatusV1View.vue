@@ -10,8 +10,14 @@
       @refresh="refresh()"
     />
 
+    <div v-if="catalogError" class="mb-4 flex flex-wrap items-center gap-3 text-xs text-amber-700 dark:text-amber-400" role="alert">
+      <span>{{ catalogError }}</span>
+      <button type="button" class="underline" :disabled="catalogLoading" data-testid="catalog-retry" @click="reloadCatalog">{{ t('channelStatus.catalog.retry') }}</button>
+    </div>
+
     <MonitorCardGrid
       :items="items"
+      :channels="catalogChannels"
       :window="currentWindow"
       :countdown-seconds="countdown"
       :loading="loading"
@@ -48,6 +54,7 @@ import MonitorCardGrid from '@/components/user/monitor/MonitorCardGrid.vue'
 import MonitorDetailDialog from '@/components/user/MonitorDetailDialog.vue'
 import { DEFAULT_INTERVAL_SECONDS, STATUS_OPERATIONAL } from '@/constants/channelMonitor'
 import { useAutoRefresh } from '@/composables/useAutoRefresh'
+import { useChannelMonitorCatalog } from '@/composables/useChannelMonitorCatalog'
 
 const { t } = useI18n()
 const appStore = useAppStore()
@@ -59,6 +66,7 @@ const currentWindow = ref<MonitorWindow>('7d')
 const detailCache = reactive<Record<number, UserMonitorDetail>>({})
 const showDetail = ref(false)
 const detailTarget = ref<UserMonitorView | null>(null)
+const { channels: catalogChannels, loading: catalogLoading, error: catalogError, reload: reloadCatalog } = useChannelMonitorCatalog()
 
 let abortController: AbortController | null = null
 
@@ -110,6 +118,7 @@ async function reload(silent = false) {
 }
 
 async function refresh(silent = false) {
+  if (!silent) void reloadCatalog()
   await reload(silent)
   // After base reload, refresh any cached detail records so non-7d availability
   // values stay in sync without forcing the user to switch tabs again.
@@ -162,6 +171,7 @@ watch(
 
 onMounted(() => {
   void reload(false)
+  void reloadCatalog()
   if (appStore.cachedPublicSettings?.channel_monitor_enabled !== false) {
     autoRefresh.setEnabled(autoRefresh.enabled.value)
   }

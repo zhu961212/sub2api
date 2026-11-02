@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"sort"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
@@ -20,9 +21,26 @@ import (
 //  4. 字段白名单：仅返回用户需要的字段（省略 BillingModelSource / RestrictModels
 //     / 内部 ID / Status 等管理字段）。
 type AvailableChannelHandler struct {
-	channelService *service.ChannelService
-	apiKeyService  *service.APIKeyService
-	settingService *service.SettingService
+	channelService  availableChannelReader
+	apiKeyService   availableChannelUserGroups
+	settingService  availableChannelRuntimeReader
+	catalogMonitors channelMonitorCatalogReader
+	catalogAccounts channelMonitorCatalogAccountReader
+	catalogAPIKeys  channelMonitorCatalogAPIKeyReader
+}
+
+type availableChannelReader interface {
+	ListAvailable(context.Context) ([]service.AvailableChannel, error)
+}
+
+type availableChannelUserGroups interface {
+	GetAvailableGroups(context.Context, int64) ([]service.Group, error)
+	GetUserGroupRates(context.Context, int64) (map[int64]float64, error)
+}
+
+type availableChannelRuntimeReader interface {
+	GetAvailableChannelsRuntime(context.Context) service.AvailableChannelsRuntime
+	GetChannelMonitorRuntime(context.Context) service.ChannelMonitorRuntime
 }
 
 // NewAvailableChannelHandler 创建用户侧可用渠道 handler。
@@ -30,11 +48,29 @@ func NewAvailableChannelHandler(
 	channelService *service.ChannelService,
 	apiKeyService *service.APIKeyService,
 	settingService *service.SettingService,
+	monitorService *service.ChannelMonitorService,
+	accountRepo service.AccountRepository,
 ) *AvailableChannelHandler {
+	// Preserve the optional-settings nil behavior when assigning an interface.
+	var runtime availableChannelRuntimeReader
+	if settingService != nil {
+		runtime = settingService
+	}
+	var monitors channelMonitorCatalogReader
+	if monitorService != nil {
+		monitors = monitorService
+	}
+	var catalogAPIKeys channelMonitorCatalogAPIKeyReader
+	if apiKeyService != nil {
+		catalogAPIKeys = apiKeyService
+	}
 	return &AvailableChannelHandler{
-		channelService: channelService,
-		apiKeyService:  apiKeyService,
-		settingService: settingService,
+		channelService:  channelService,
+		apiKeyService:   apiKeyService,
+		settingService:  runtime,
+		catalogMonitors: monitors,
+		catalogAccounts: accountRepo,
+		catalogAPIKeys:  catalogAPIKeys,
 	}
 }
 

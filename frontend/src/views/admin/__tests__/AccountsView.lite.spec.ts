@@ -4,6 +4,7 @@ import { defineComponent } from 'vue'
 
 import AccountsView from '../AccountsView.vue'
 import AccountActionMenu from '@/components/admin/account/AccountActionMenu.vue'
+import AccountUsageCell from '@/components/account/AccountUsageCell.vue'
 
 const {
   listAccounts,
@@ -67,6 +68,7 @@ const DataTableStub = defineComponent({
     <div>
       <div v-for="row in data" :key="row.id" :data-account-name="row.name">
         <slot name="cell-groups" :row="row" />
+        <slot name="cell-usage" :row="row" />
         <slot name="cell-actions" :row="row" />
       </div>
     </div>
@@ -197,6 +199,36 @@ describe('admin AccountsView lite account list', () => {
     wrapper.unmount()
   })
 
+  it('refreshes local quota in the shared row when active upstream usage arrives', async () => {
+    const initial = { ...listRow, updated_at: '2026-11-03T01:00:00Z', quota_daily_used: 3, schedulable: false }
+    listAccounts.mockResolvedValue({ items: [initial], total: 1, page: 1, page_size: 20, pages: 1 })
+    const wrapper = mountView()
+    await flushPromises()
+    const cell = wrapper.getComponent(AccountUsageCell)
+    cell.vm.$emit('usage-loaded', {
+      five_hour: { utilization: 60 },
+      local_quota: { account_id: 42, updated_at: '2026-11-03T01:02:00Z', quota_daily_used: 4, quota_5h_used: 2 }
+    })
+    await flushPromises()
+    let row = wrapper.getComponent(DataTableStub).props('data')[0]
+    expect(row.quota_daily_used).toBe(4)
+    expect(row.quota_5h_used).toBe(2)
+    expect(row.schedulable).toBe(false)
+
+    cell.vm.$emit('usage-loaded', {
+      five_hour: { utilization: 65 },
+      local_quota: { account_id: 42, updated_at: '2026-11-03T01:01:00Z', quota_daily_used: 1 }
+    })
+    await flushPromises()
+    row = wrapper.getComponent(DataTableStub).props('data')[0]
+    expect(row.quota_daily_used).toBe(4)
+
+    cell.vm.$emit('usage-loaded', { five_hour: { utilization: 70 } })
+    await flushPromises()
+    expect(wrapper.getComponent(DataTableStub).props('data')[0].quota_daily_used).toBe(4)
+    wrapper.unmount()
+  })
+
   it('keeps the action menu open during internal scrolling but closes it on table scrolling', async () => {
     const wrapper = mountView(false)
     await flushPromises()
@@ -234,6 +266,82 @@ describe('admin AccountsView lite account list', () => {
       expect.objectContaining({ lite: '1' }),
       expect.objectContaining({ etag: null })
     )
+    wrapper.unmount()
+  })
+
+  it.each([
+    ['quota_5h_used', 0],
+    ['quota_5h_limit', 15],
+    ['quota_daily_used', 0],
+    ['quota_daily_limit', 35],
+    ['quota_weekly_used', 0],
+    ['quota_weekly_limit', 150],
+    ['quota_used', 91],
+    ['quota_limit', 250],
+  ])('refreshes changed %s without relying on updated_at', async (field, nextValue) => {
+    vi.useFakeTimers()
+    vi.spyOn(document, 'hidden', 'get').mockReturnValue(false)
+    localStorage.setItem('account-auto-refresh', JSON.stringify({ enabled: true, interval_seconds: 5 }))
+    const initialAccount = {
+      ...listRow,
+      updated_at: '2026-11-01T15:59:00Z',
+      quota_5h_used: 1.57,
+      quota_5h_limit: 10,
+      quota_daily_used: 6,
+      quota_daily_limit: 30,
+      quota_weekly_used: 30,
+      quota_weekly_limit: 100,
+      quota_used: 90,
+      quota_limit: 200,
+    }
+    listAccounts.mockResolvedValue({ items: [initialAccount], total: 1, page: 1, page_size: 20, pages: 1 })
+    listWithEtag.mockResolvedValueOnce({
+      notModified: false,
+      etag: 'quota-reset',
+      data: { items: [{ ...initialAccount, [field]: nextValue }], total: 1, page: 1, page_size: 20, pages: 1 },
+    })
+    const wrapper = mountView()
+    await flushPromises()
+    const before = wrapper.getComponent(DataTableStub).props('data')[0]
+
+    await vi.advanceTimersByTimeAsync(6000)
+    await flushPromises()
+
+    const after = wrapper.getComponent(DataTableStub).props('data')[0]
+    expect(listWithEtag).toHaveBeenCalledOnce()
+    expect(after).not.toBe(before)
+    expect(after[field]).toBe(nextValue)
+    expect(after.updated_at).toBe(initialAccount.updated_at)
+    wrapper.unmount()
+  })
+
+  it('preserves the existing row when a refreshed quota snapshot is unchanged', async () => {
+    vi.useFakeTimers()
+    vi.spyOn(document, 'hidden', 'get').mockReturnValue(false)
+    localStorage.setItem('account-auto-refresh', JSON.stringify({ enabled: true, interval_seconds: 5 }))
+    const initialAccount = {
+      ...listRow,
+      updated_at: '2026-11-01T15:59:00Z',
+      quota_5h_used: 1.57, quota_5h_limit: 10,
+      quota_daily_used: 6, quota_daily_limit: 30,
+      quota_weekly_used: 30, quota_weekly_limit: 100,
+      quota_used: 90, quota_limit: 200,
+    }
+    listAccounts.mockResolvedValue({ items: [initialAccount], total: 1, page: 1, page_size: 20, pages: 1 })
+    listWithEtag.mockResolvedValueOnce({
+      notModified: false,
+      etag: 'same-quota',
+      data: { items: [{ ...initialAccount, extra: { ...initialAccount.extra } }], total: 1, page: 1, page_size: 20, pages: 1 },
+    })
+    const wrapper = mountView()
+    await flushPromises()
+    const before = wrapper.getComponent(DataTableStub).props('data')[0]
+
+    await vi.advanceTimersByTimeAsync(6000)
+    await flushPromises()
+
+    expect(listWithEtag).toHaveBeenCalledOnce()
+    expect(wrapper.getComponent(DataTableStub).props('data')[0]).toBe(before)
     wrapper.unmount()
   })
 

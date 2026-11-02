@@ -83,7 +83,11 @@ func (s *openaiOAuthService) RefreshTokenWithClientID(ctx context.Context, refre
 }
 
 func (s *openaiOAuthService) refreshTokenWithClientID(ctx context.Context, refreshToken, proxyURL, clientID string) (*openai.TokenResponse, error) {
-	client, err := createOpenAIReqClient(proxyURL)
+	client, err := getSharedReqClient(reqClientOptions{
+		ProxyURL:                proxyURL,
+		Timeout:                 120 * time.Second,
+		DisableEnvironmentProxy: service.AccountEvaluationUsesDirectConnection(ctx),
+	})
 	if err != nil {
 		return nil, infraerrors.Newf(http.StatusBadGateway, "OPENAI_OAUTH_CLIENT_INIT_FAILED", "create HTTP client: %v", err)
 	}

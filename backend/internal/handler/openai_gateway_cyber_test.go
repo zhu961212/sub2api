@@ -1,15 +1,132 @@
 package handler
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
+
+type cyberQuotaUsageBillingRepo struct {
+	service.UsageBillingRepository
+	mu       sync.Mutex
+	commands []service.UsageBillingCommand
+}
+
+type cyberQuotaAccountRepo struct {
+	service.AccountRepository
+	latest *service.Account
+}
+
+func (r *cyberQuotaAccountRepo) GetByID(context.Context, int64) (*service.Account, error) {
+	return r.latest, nil
+}
+
+func (r *cyberQuotaUsageBillingRepo) Apply(_ context.Context, command *service.UsageBillingCommand) (*service.UsageBillingApplyResult, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.commands = append(r.commands, *command)
+	return &service.UsageBillingApplyResult{Applied: false}, nil
+}
+
+func (r *cyberQuotaUsageBillingRepo) snapshot() []service.UsageBillingCommand {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]service.UsageBillingCommand(nil), r.commands...)
+}
+
+type cyberQuotaBlockingModerationRepo struct {
+	contentModerationHandlerTestRepo
+	started chan struct{}
+	release chan struct{}
+}
+
+func (r *cyberQuotaBlockingModerationRepo) CreateLog(ctx context.Context, log *service.ContentModerationLog) error {
+	close(r.started)
+	<-r.release
+	return r.contentModerationHandlerTestRepo.CreateLog(ctx, log)
+}
+
+func TestRecordCyberPolicyIfMarked_BudgetedUsageSettlesBeforeAudit(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		forwardErrored bool
+		wantBills      int
+		fiveHourOnly   bool
+		dynamicWS      bool
+	}{
+		{name: "failed_forward_bills_real_tokens_once", forwardErrored: true, wantBills: 1},
+		{name: "failed_forward_5h_budget", forwardErrored: true, wantBills: 1, fiveHourOnly: true},
+		{name: "existing_websocket_gains_5h_budget", forwardErrored: true, wantBills: 1, fiveHourOnly: true, dynamicWS: true},
+		{name: "successful_forward_uses_normal_billing"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := service.NewUsageRecordWorkerPoolWithOptions(service.UsageRecordWorkerPoolOptions{
+				WorkerCount: 1, QueueSize: 8, TaskTimeout: time.Second, OverflowPolicy: "drop",
+			})
+			workerStarted, releaseWorker := make(chan struct{}), make(chan struct{})
+			pool.Submit(func(context.Context) { close(workerStarted); <-releaseWorker })
+			<-workerStarted
+			t.Cleanup(func() { close(releaseWorker); pool.Stop() })
+			moderationRepo := &cyberQuotaBlockingModerationRepo{started: make(chan struct{}), release: make(chan struct{})}
+			defer close(moderationRepo.release)
+			settings := &contentModerationHandlerSettingRepo{values: map[string]string{service.SettingKeyRiskControlEnabled: "true"}}
+			moderationService := service.NewContentModerationService(settings, moderationRepo, nil, nil, nil, nil, nil, nil)
+			usageRepo := &openAIWSUsageHandlerUsageLogRepoStub{created: make(chan *service.UsageLog, 2)}
+			billingRepo := &cyberQuotaUsageBillingRepo{}
+			accountRepo := &cyberQuotaAccountRepo{}
+			cfg := &config.Config{RunMode: config.RunModeSimple}
+			cfg.Default.RateMultiplier = 1
+			gateway := service.NewOpenAIGatewayService(accountRepo, usageRepo, billingRepo, nil, nil, nil, nil, cfg,
+				nil, nil, service.NewBillingService(cfg, nil), nil, &service.BillingCacheService{}, nil, &service.DeferredService{},
+				nil, nil, nil, nil, nil, nil, nil)
+			h := &OpenAIGatewayHandler{gatewayService: gateway, contentModerationService: moderationService, usageRecordWorkerPool: pool}
+			c := newTestGinContext()
+			c.Request = httptest.NewRequest(http.MethodPost, "/openai/v1/responses", strings.NewReader(`{}`))
+			c.Writer.Header().Set("X-Request-Id", "cyber-quota")
+			service.MarkOpsCyberPolicy(c, service.CyberPolicyMark{Message: "blocked", UpstreamStatus: 400, UpstreamInTok: 100, UpstreamOutTok: 20})
+			account := &service.Account{ID: 3, Platform: service.PlatformOpenAI, Type: service.AccountTypeOAuth, Extra: map[string]any{"quota_daily_limit": 20.0}}
+			if tc.fiveHourOnly {
+				account.Extra = map[string]any{"quota_5h_limit": 5.0}
+			}
+			accountRepo.latest = account
+			if tc.dynamicWS {
+				account = &service.Account{ID: account.ID, Platform: account.Platform, Type: account.Type}
+				setOpsEndpointContext(c, "", int16(service.RequestTypeWSV2))
+			}
+			apiKey := &service.APIKey{ID: 2, User: &service.User{ID: 1}}
+			h.recordCyberPolicyIfMarked(c, apiKey, account, nil, "gpt-5.1", tc.forwardErrored, nil, service.ChannelUsageFields{}, "payload")
+			h.recordCyberPolicyIfMarked(c, apiKey, account, nil, "gpt-5.1", tc.forwardErrored, nil, service.ChannelUsageFields{}, "payload")
+			bills := billingRepo.snapshot()
+			require.Len(t, bills, tc.wantBills, "quota bills must finish without waiting for audit or queued usage, and the guard must prevent duplicates")
+			if tc.wantBills > 0 {
+				require.Equal(t, 100, bills[0].InputTokens)
+				require.Equal(t, 20, bills[0].OutputTokens)
+				require.Positive(t, bills[0].AccountQuotaCost)
+				require.Zero(t, bills[0].BalanceCost)
+				select {
+				case log := <-usageRepo.created:
+					require.Equal(t, service.RequestTypeCyberBlocked, log.RequestType)
+				default:
+					t.Fatal("the cyber usage row must be recorded before returning")
+				}
+			}
+			select {
+			case <-moderationRepo.started:
+			case <-time.After(time.Second):
+				t.Fatal("the independent audit task did not start")
+			}
+		})
+	}
+}
 
 // newTestGinContext builds a bare gin.Context backed by an httptest recorder.
 func newTestGinContext() *gin.Context {

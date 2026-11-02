@@ -48,7 +48,7 @@
             type="button"
             :title="t('common.refresh')"
             :disabled="loading"
-            @click="reload(false)"
+            @click="refreshAll"
           >
             <Icon name="refresh" size="sm" :class="loading ? 'animate-spin' : ''" />
           </button>
@@ -269,6 +269,8 @@
         </div>
       </div>
 
+      <ChannelGroupCatalog v-if="!isAdmin" ref="groupCatalog" />
+
       <section class="card flex min-h-0 flex-col overflow-hidden !rounded-3xl !border-0 shadow-sm ring-1 ring-gray-900/5 dark:!bg-dark-800 dark:ring-dark-700">
         <div class="border-b border-gray-100 px-5 pt-4 dark:border-dark-700 sm:px-6">
           <nav class="tabs w-full max-w-md sm:w-auto" role="tablist" :aria-label="t('channelMonitorV2.tabs.aria')">
@@ -462,6 +464,7 @@ import { useI18n } from 'vue-i18n'
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import AppLayout from '@/components/layout/AppLayout.vue'
+import ChannelGroupCatalog from '@/components/user/monitor/ChannelGroupCatalog.vue'
 import Icon from '@/components/icons/Icon.vue'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
 import Select from '@/components/common/Select.vue'
@@ -511,6 +514,7 @@ const authStore = useAuthStore()
 const appStore = useAppStore()
 const { t, te, locale } = useI18n()
 const isAdmin = computed(() => authStore.isAdmin)
+const groupCatalog = ref<InstanceType<typeof ChannelGroupCatalog> | null>(null)
 /** Admins always see RPM/TPM; users honor the hide-throughput system setting. */
 const showThroughput = computed(() => isAdmin.value || !isChannelMonitorThroughputHidden())
 /** Admins always see ranking; users honor the hide-user-ranking system setting. */
@@ -726,6 +730,11 @@ async function loadMetrics(signal?: AbortSignal, id = sequence) {
   matrix.value = nextMatrix
   scheduleAutoRefresh()
   await loadTab(signal, id)
+}
+
+function refreshAll() {
+  void groupCatalog.value?.reload?.()
+  void reload(false)
 }
 
 async function reload(silent = true) {

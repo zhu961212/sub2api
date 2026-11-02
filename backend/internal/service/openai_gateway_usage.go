@@ -57,6 +57,7 @@ type CyberPolicyUsageInput struct {
 	RequestID    string
 	Model        string
 	Stream       bool
+	OpenAIWSMode bool // Persistent connections must reload current local-budget settings.
 	InputTokens  int
 	OutputTokens int
 	// 渠道归因与请求级 meta，使 cyber 计费行与正常 RecordUsage 行口径一致
@@ -83,9 +84,10 @@ func (s *OpenAIGatewayService) RecordCyberPolicyUsageLog(ctx context.Context, in
 		return
 	}
 	result := &OpenAIForwardResult{
-		RequestID: in.RequestID,
-		Model:     in.Model,
-		Stream:    in.Stream,
+		RequestID:    in.RequestID,
+		Model:        in.Model,
+		Stream:       in.Stream,
+		OpenAIWSMode: in.OpenAIWSMode,
 		Usage: OpenAIUsage{
 			InputTokens:  in.InputTokens,
 			OutputTokens: in.OutputTokens,
@@ -171,6 +173,16 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 	billingAccount, err := resolveCredentialAccount(ctx, s.accountRepo, account)
 	if err != nil {
 		return err
+	}
+	quotaAccount := billingAccount
+	// A WebSocket connection can outlive a policy change. Its forwarding account
+	// is immutable, so load current local-budget settings for each billed turn.
+	if result.OpenAIWSMode && !account.IsShadow() && billingAccount.IsOpenAIOAuth() && s.accountRepo != nil {
+		if latest, quotaErr := s.accountRepo.GetByID(ctx, billingAccount.ID); quotaErr == nil && latest != nil {
+			quotaAccount = latest
+		} else if quotaErr != nil {
+			logger.LegacyPrintf("service.openai_gateway", "account quota snapshot refresh failed: account=%d err=%v", billingAccount.ID, quotaErr)
+		}
 	}
 	if !isGrokVideoUsageResult(result, nil) {
 		ApplyOpenAIImageBillingResolution(result)
@@ -493,7 +505,8 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 	}
 
 	simpleModeKeyRateLimitOnly := simpleModeKeyRateLimitBillingEnabled(s.cfg, apiKey)
-	if s.cfg != nil && s.cfg.RunMode == config.RunModeSimple && !simpleModeKeyRateLimitOnly {
+	simpleModeAccountQuota := s.cfg != nil && s.cfg.RunMode == config.RunModeSimple && quotaAccount.IsOpenAIOAuth() && quotaAccount.SupportsAccountQuota() && quotaAccount.HasAnyQuotaLimit()
+	if s.cfg != nil && s.cfg.RunMode == config.RunModeSimple && !simpleModeKeyRateLimitOnly && !simpleModeAccountQuota {
 		writeUsageLogBestEffort(ctx, s.usageLogRepo, usageLog, "service.openai_gateway")
 		logger.LegacyPrintf("service.openai_gateway", "[SIMPLE MODE] Usage recorded (not billed): user=%d, tokens=%d", usageLog.UserID, usageLog.TotalTokens())
 		s.deferredService.ScheduleLastUsedUpdate(account.ID)
@@ -512,13 +525,16 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 		User:                       user,
 		APIKey:                     apiKey,
 		Account:                    account,
+		QuotaAccount:               quotaAccount,
 		Subscription:               subscription,
 		RequestPayloadHash:         resolveUsageBillingPayloadFingerprint(ctx, input.RequestPayloadHash),
 		IsSubscriptionBill:         isSubscriptionBilling && !simpleModeKeyRateLimitOnly,
 		AccountRateMultiplier:      accountRateMultiplier,
+		AccountStatsCost:           usageLog.AccountStatsCost,
 		APIKeyService:              input.APIKeyService,
 		Platform:                   quotaPlatform,
 		SimpleModeKeyRateLimitOnly: simpleModeKeyRateLimitOnly,
+		SimpleModeAccountQuota:     simpleModeAccountQuota,
 	}, s.billingDeps(), s.usageBillingRepo)
 
 	if billingErr != nil {

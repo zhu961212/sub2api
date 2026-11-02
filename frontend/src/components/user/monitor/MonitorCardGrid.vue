@@ -2,7 +2,7 @@
   <div>
     <div
       v-if="loading && items.length === 0"
-      class="grid gap-5 grid-cols-1 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4"
+      class="grid grid-cols-1 gap-5 md:grid-cols-2 xl:grid-cols-3"
     >
       <div
         v-for="i in 6"
@@ -33,12 +33,13 @@
 
     <div
       v-else
-      class="grid gap-5 grid-cols-1 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4"
+      class="grid grid-cols-1 gap-5 md:grid-cols-2 xl:grid-cols-3"
     >
       <MonitorCard
         v-for="item in items"
         :key="item.id"
         :item="item"
+        :groups="groupsForMonitor(item.id)"
         :window="window"
         :availability-value="resolveAvailability(item)"
         :countdown-seconds="countdownSeconds"
@@ -49,8 +50,10 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { UserMonitorView, UserMonitorDetail } from '@/api/channelMonitor'
+import type { ChannelCatalogEntry, ChannelCatalogGroup } from '@/api/channelMonitorCatalog'
 import EmptyState from '@/components/common/EmptyState.vue'
 import MonitorCard from './MonitorCard.vue'
 
@@ -60,6 +63,7 @@ const props = defineProps<{
   countdownSeconds: number
   loading: boolean
   detailCache: Record<number, UserMonitorDetail>
+  channels?: ChannelCatalogEntry[]
 }>()
 
 const emit = defineEmits<{
@@ -67,6 +71,36 @@ const emit = defineEmits<{
 }>()
 
 const { t } = useI18n()
+
+const monitorGroups = computed(() => {
+  const result = new Map<number, Map<number, ChannelCatalogGroup>>()
+  for (const channel of props.channels ?? []) {
+    for (const group of channel.groups) {
+      for (const monitorID of group.monitor_ids ?? []) {
+        if (!result.has(monitorID)) result.set(monitorID, new Map())
+        const groups = result.get(monitorID)!
+        // A group can belong to multiple channels; retain all configured models.
+        const existing = groups.get(group.id)
+        if (!existing) groups.set(group.id, { ...group, available_models: [...group.available_models] })
+        else {
+          const models = new Set(existing.available_models.map(model => `${model.platform}:${model.name}`))
+          for (const model of group.available_models) {
+            const key = `${model.platform}:${model.name}`
+            if (!models.has(key)) {
+              existing.available_models.push(model)
+              models.add(key)
+            }
+          }
+        }
+      }
+    }
+  }
+  return result
+})
+
+function groupsForMonitor(id: number): ChannelCatalogGroup[] {
+  return [...(monitorGroups.value.get(id)?.values() ?? [])]
+}
 
 function resolveAvailability(item: UserMonitorView): number | null {
   if (props.window === '7d') {

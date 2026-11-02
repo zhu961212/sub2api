@@ -130,6 +130,69 @@ describe('AccountUsageCell', () => {
     })
   })
 
+  it('forwards the local quota snapshot after active upstream sampling', async () => {
+    const seed = {
+      source: 'passive' as const, updated_at: null,
+      five_hour: { utilization: 10, resets_at: null, remaining_seconds: 0 },
+      seven_day: null, seven_day_sonnet: null
+    }
+    const result = {
+      ...seed, source: 'active', five_hour: { ...seed.five_hour, utilization: 60 },
+      local_quota: { account_id: 71001, updated_at: '2026-11-03T01:02:00Z', quota_daily_used: 4 }
+    }
+    getUsage.mockResolvedValue(result)
+    const wrapper = mount(AccountUsageCell, {
+      props: {
+        account: makeAccount({ id: 71001, platform: 'openai', type: 'oauth' }),
+        batchedUsage: seed, requestBatchedUsage: vi.fn()
+      },
+      global: {
+        stubs: {
+          OpenAIQuotaResetCell: { template: '<div><slot name="pre-actions" /></div>' },
+          UsageProgressBar: true
+        }
+      }
+    })
+    await flushPromises()
+    await wrapper.get('button').trigger('click')
+    await flushPromises()
+    expect(getUsage).toHaveBeenCalledWith(71001, 'active', true)
+    const events = wrapper.emitted('usage-loaded') ?? []
+    expect(events[events.length - 1]?.[0]).toEqual(result)
+    wrapper.unmount()
+  })
+
+  it('does not apply a completed active query to a different account', async () => {
+    const seed = {
+      source: 'passive' as const, updated_at: null,
+      five_hour: { utilization: 10, resets_at: null, remaining_seconds: 0 },
+      seven_day: null, seven_day_sonnet: null
+    }
+    let finish!: (value: unknown) => void
+    getUsage.mockImplementation(() => new Promise(resolve => { finish = resolve }))
+    const wrapper = mount(AccountUsageCell, {
+      props: {
+        account: makeAccount({ id: 71002, platform: 'openai', type: 'oauth' }),
+        batchedUsage: seed, requestBatchedUsage: vi.fn()
+      },
+      global: {
+        stubs: {
+          OpenAIQuotaResetCell: { template: '<div><slot name="pre-actions" /></div>' },
+          UsageProgressBar: true
+        }
+      }
+    })
+    await flushPromises()
+    await wrapper.get('button').trigger('click')
+    await wrapper.setProps({ account: makeAccount({ id: 71003, platform: 'openai', type: 'oauth' }) })
+    await flushPromises()
+    const eventCount = wrapper.emitted('usage-loaded')?.length
+    finish({ ...seed, local_quota: { account_id: 71002, quota_daily_used: 100 } })
+    await flushPromises()
+    expect(wrapper.emitted('usage-loaded')?.length).toBe(eventCount)
+    wrapper.unmount()
+  })
+
   it('renders eligible Ollama Cloud state and forwards query updates', async () => {
     const wrapper = mount(AccountUsageCell, {
       props: {
@@ -1778,6 +1841,38 @@ describe('AccountUsageCell', () => {
     const bars = wrapper.findAll('usage-progress-bar-stub')
     expect(bars.map((bar) => bar.attributes('label'))).toEqual(['1d', 'total'])
     expect(getUsage).not.toHaveBeenCalled()
+  })
+
+  it('keeps the official usage windows independent from configured local account budgets', async () => {
+    const fiveHourReset = '2026-11-02T09:00:00Z'
+    const sevenDayReset = '2026-11-07T09:00:00Z'
+    getUsage.mockResolvedValue({ five_hour: { utilization: 15, resets_at: fiveHourReset }, seven_day: { utilization: 20, resets_at: sevenDayReset } })
+    const wrapper = mount(AccountUsageCell, {
+      props: { account: makeAccount({ platform: 'openai', type: 'oauth', extra: { quota_daily_start: new Date().toISOString(), quota_5h_start: new Date().toISOString() }, quota_daily_limit: 20, quota_daily_used: 5, quota_5h_limit: 10, quota_5h_used: 9 }) },
+      global: { stubs: { UsageProgressBar: true, OpenAIQuotaResetCell: true } }
+    })
+    await flushPromises()
+    expect(getUsage).toHaveBeenCalled()
+    expect(wrapper.find('[data-testid="openai-local-quota"]').exists()).toBe(false)
+    const bars = wrapper.findAllComponents({ name: 'UsageProgressBar' })
+    expect(bars.map(bar => [bar.props('label'), bar.props('utilization'), bar.props('resetsAt')])).toEqual([
+      ['5h', 15, fiveHourReset], ['7d', 20, sevenDayReset],
+    ])
+    expect(wrapper.findComponent({ name: 'OpenAIQuotaResetCell' }).exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('keeps official querying available without inventing usage from local quota counters', async () => {
+    getUsage.mockResolvedValue({})
+    const wrapper = mount(AccountUsageCell, {
+      props: { account: makeAccount({ platform: 'openai', type: 'oauth', quota_daily_limit: 20, quota_daily_used: 15, quota_5h_limit: 10, quota_5h_used: 4 }) },
+      global: { stubs: { UsageProgressBar: true, OpenAIQuotaResetCell: true } }
+    })
+    await flushPromises()
+    expect(getUsage).toHaveBeenCalled()
+    expect(wrapper.findAllComponents({ name: 'UsageProgressBar' })).toHaveLength(0)
+    expect(wrapper.findComponent({ name: 'OpenAIQuotaResetCell' }).exists()).toBe(true)
+    wrapper.unmount()
   })
 
   it('Gemini 第三方上游 API Key 按普通 Key 账号展示今日统计与额度，不显示 Gemini 徽章', async () => {

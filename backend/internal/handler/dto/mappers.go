@@ -349,6 +349,17 @@ func AccountFromServiceShallow(a *service.Account) *Account {
 			used := a.GetQuotaUsed()
 			out.QuotaUsed = &used
 		}
+		if limit := a.GetQuota5hLimit(); limit > 0 {
+			out.Quota5hLimit = &limit
+			used := a.GetQuota5hUsed()
+			if a.IsQuota5hPeriodExpired() {
+				used = 0
+			} else if resetAt := a.Quota5hResetAt(); !resetAt.IsZero() {
+				value := resetAt.UTC().Format(time.RFC3339)
+				out.Quota5hResetAt = &value
+			}
+			out.Quota5hUsed = &used
+		}
 		if limit := a.GetQuotaDailyLimit(); limit > 0 {
 			out.QuotaDailyLimit = &limit
 			used := a.GetQuotaDailyUsed()
@@ -466,7 +477,7 @@ func AccountListItemFromAccount(a *Account) *AccountListItem {
 	}
 	return &AccountListItem{
 		ID: a.ID, Name: a.Name, Notes: a.Notes, Platform: a.Platform, Type: a.Type,
-		Credentials: a.Credentials, CredentialsStatus: a.CredentialsStatus, Extra: a.Extra,
+		Credentials: a.Credentials, CredentialsStatus: a.CredentialsStatus, Extra: accountListEvaluationExtra(a.Extra),
 		OllamaCloudUsage: a.OllamaCloudUsage, OpenCodeGoUsage: a.OpenCodeGoUsage,
 		ProxyID: a.ProxyID, ProxyFallbackOriginID: a.ProxyFallbackOriginID, ProxyFallbackOriginName: a.ProxyFallbackOriginName,
 		Concurrency: a.Concurrency, LoadFactor: a.LoadFactor, Priority: a.Priority, RateMultiplier: a.RateMultiplier,
@@ -483,6 +494,7 @@ func AccountListItemFromAccount(a *Account) *AccountListItem {
 		EnableSessionIDMasking: a.EnableSessionIDMasking, CacheTTLOverrideEnabled: a.CacheTTLOverrideEnabled,
 		CacheTTLOverrideTarget: a.CacheTTLOverrideTarget, CustomBaseURLEnabled: a.CustomBaseURLEnabled,
 		CustomBaseURL: a.CustomBaseURL, QuotaLimit: a.QuotaLimit, QuotaUsed: a.QuotaUsed,
+		Quota5hLimit: a.Quota5hLimit, Quota5hUsed: a.Quota5hUsed, Quota5hResetAt: a.Quota5hResetAt,
 		QuotaDailyLimit: a.QuotaDailyLimit, QuotaDailyUsed: a.QuotaDailyUsed, QuotaWeeklyLimit: a.QuotaWeeklyLimit,
 		QuotaWeeklyUsed: a.QuotaWeeklyUsed, QuotaDailyResetMode: a.QuotaDailyResetMode,
 		QuotaDailyResetHour: a.QuotaDailyResetHour, QuotaWeeklyResetMode: a.QuotaWeeklyResetMode,

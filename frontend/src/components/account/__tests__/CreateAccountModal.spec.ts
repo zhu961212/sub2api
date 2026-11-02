@@ -854,6 +854,28 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
     expect(importCodexSessionMock.mock.calls[0]?.[0]?.extra?.openai_long_context_billing_enabled).toBeUndefined()
   })
 
+  it('includes local daily quota configuration in OAuth session imports', async () => {
+    const wrapper = mountModal()
+    await selectButtonByText(wrapper, 'OpenAI')
+    const card = wrapper.findComponent({ name: 'QuotaLimitCard' })
+    expect(card.exists()).toBe(true)
+    card.vm.$emit('update:dailyLimit', 20)
+    card.vm.$emit('update:dailyResetMode', 'fixed')
+    card.vm.$emit('update:dailyResetHour', 0)
+    card.vm.$emit('update:resetTimezone', 'Asia/Shanghai')
+    await wrapper.get('form#create-account-form input[type="text"]').setValue('Daily budget')
+    await wrapper.get('form#create-account-form').trigger('submit.prevent')
+    await wrapper.get('[data-testid="import-codex-session"]').trigger('click')
+    await flushPromises()
+    expect(importCodexSessionMock.mock.calls[0]?.[0]?.extra).toMatchObject({
+      quota_daily_limit: 20,
+      quota_daily_reset_mode: 'fixed',
+      quota_daily_reset_hour: 0,
+      quota_reset_timezone: 'Asia/Shanghai'
+    })
+    wrapper.unmount()
+  })
+
   it('leaves Codex PAT import billing ownership to the backend', async () => {
     const wrapper = await openCodexImportStep()
     await wrapper.get('[data-testid="import-codex-pat"]').trigger('click')

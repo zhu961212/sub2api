@@ -13,6 +13,7 @@ import { useRoutePrefetch } from '@/composables/useRoutePrefetch'
 import { getSetupStatus } from '@/api/setup'
 import { resolveCompletedSetupRedirectPath } from './setupRedirect'
 import { resolveRouteDocumentTitle } from './title'
+import { accountCustomizationRoutes } from './accountCustomizations'
 
 /**
  * Route definitions with lazy loading
@@ -548,6 +549,7 @@ const routes: RouteRecordRaw[] = [
       descriptionKey: 'admin.accounts.description'
     }
   },
+  ...accountCustomizationRoutes,
   {
     path: '/admin/plugins',
     name: 'AdminPlugins',

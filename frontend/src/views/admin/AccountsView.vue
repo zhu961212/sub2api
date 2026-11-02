@@ -532,6 +532,7 @@ import ErrorPassthroughRulesModal from '@/components/admin/ErrorPassthroughRules
 import TLSFingerprintProfilesModal from '@/components/admin/TLSFingerprintProfilesModal.vue'
 import { fetchAllAccountIds } from '@/utils/accountSelection'
 import { buildGrokUsageRefreshKey, buildOpenAIUsageRefreshKey } from '@/utils/accountUsageRefresh'
+import { mergeAccountLocalQuota } from '@/utils/accountLocalQuota'
 import { formatDateTime, formatRelativeTime } from '@/utils/format'
 import { proxyExpiryBadgeClass, proxyExpiryLabelKey } from '@/utils/proxyExpiry'
 import { extractApiErrorMessage } from '@/utils/apiError'
@@ -748,6 +749,7 @@ const usageBatchErrorByAccountId = ref<Record<string, string | null>>({})
 const usageBatchLoadingByAccountId = ref<Record<string, boolean>>({})
 const usageBatchRequestTokenByAccountId = ref<Record<string, number>>({})
 const usageBatchCache = new Map<number, { data: AccountUsageInfo; ts: number }>()
+const localQuotaVersions = new Map<number, string>()
 const USAGE_BATCH_CACHE_TTL = 5 * 60 * 1000
 const pendingUsageBatchIds = new Set<number>()
 let usageBatchFlushTimer: ReturnType<typeof setTimeout> | null = null
@@ -792,8 +794,20 @@ const setUsageBatchState = (accountID: number, usage: AccountUsageInfo | null, e
   }
 }
 
+const syncAccountLocalQuota = (accountID: number, usage: AccountUsageInfo) => {
+  const account = accounts.value.find(item => item.id === accountID)
+  if (!account) return
+  const updated = mergeAccountLocalQuota(account, usage.local_quota, localQuotaVersions.get(accountID))
+  if (updated !== account) {
+    localQuotaVersions.set(accountID, usage.local_quota!.updated_at)
+    patchAccountInList(updated)
+  }
+}
+
 const handleAccountUsageLoaded = (accountID: number, usage: AccountUsageInfo) => {
+  syncAccountLocalQuota(accountID, usage)
   if (usageBatchByAccountId.value[String(accountID)] === usage) return
+  usageBatchCache.set(accountID, { data: usage, ts: Date.now() })
   setUsageBatchState(accountID, usage, null)
 }
 
@@ -1435,6 +1449,14 @@ const shouldReplaceAutoRefreshRow = (current: Account, next: Account) => {
     current.rate_limit_reset_at !== next.rate_limit_reset_at ||
     current.overload_until !== next.overload_until ||
     current.temp_unschedulable_until !== next.temp_unschedulable_until ||
+    current.quota_5h_used !== next.quota_5h_used ||
+    current.quota_5h_limit !== next.quota_5h_limit ||
+    current.quota_daily_used !== next.quota_daily_used ||
+    current.quota_daily_limit !== next.quota_daily_limit ||
+    current.quota_weekly_used !== next.quota_weekly_used ||
+    current.quota_weekly_limit !== next.quota_weekly_limit ||
+    current.quota_used !== next.quota_used ||
+    current.quota_limit !== next.quota_limit ||
     buildOpenAIUsageRefreshKey(current) !== buildOpenAIUsageRefreshKey(next) ||
     buildGrokUsageRefreshKey(current) !== buildGrokUsageRefreshKey(next)
   )

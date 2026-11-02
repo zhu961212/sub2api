@@ -506,6 +506,14 @@ func TestBuildSchedulerMetadataAccount_KeepsQuotaStateForCachedAccounts(t *testi
 			extra: map[string]any{"quota_limit": 10.0, "quota_used": 10.0}, quotaExceeded: true,
 		},
 		{
+			name: "openai oauth five hour quota exhausted", platform: service.PlatformOpenAI, typ: service.AccountTypeOAuth,
+			extra: map[string]any{"quota_5h_limit": 5.0, "quota_5h_used": 5.0, "quota_5h_start": activeStart}, quotaExceeded: true,
+		},
+		{
+			name: "openai oauth five hour quota expired", platform: service.PlatformOpenAI, typ: service.AccountTypeOAuth,
+			extra: map[string]any{"quota_5h_limit": 5.0, "quota_5h_used": 5.0, "quota_5h_start": now.Add(-6 * time.Hour).Format(time.RFC3339)},
+		},
+		{
 			name: "gemini api key rolling daily quota exhausted", platform: service.PlatformGemini, typ: service.AccountTypeAPIKey,
 			extra: map[string]any{
 				"quota_daily_limit": 20.0, "quota_daily_used": 20.0,

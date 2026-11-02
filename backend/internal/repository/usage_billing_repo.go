@@ -203,8 +203,12 @@ func (r *usageBillingRepository) applyUsageBillingEffects(ctx context.Context, t
 	}
 
 	// 账号已不存在时跳过其配额计数，其余结算项不受影响。
-	if cmd.AccountQuotaCost > 0 && service.AccountTypeSupportsQuota(cmd.AccountType) {
-		quotaState, err := incrementUsageBillingAccountQuota(ctx, tx, cmd.AccountID, cmd.AccountQuotaCost, cmd.AccountQuotaHasDailyLimit, cmd.AccountQuotaHasWeeklyLimit)
+	if cmd.AccountQuotaCost > 0 && service.AccountSupportsQuota(cmd.AccountType, cmd.AccountPlatform) {
+		quotaAccountID := cmd.AccountID
+		if cmd.AccountQuotaAccountID > 0 {
+			quotaAccountID = cmd.AccountQuotaAccountID
+		}
+		quotaState, err := incrementUsageBillingAccountQuota(ctx, tx, quotaAccountID, cmd.AccountQuotaCost, cmd.AccountQuotaHasDailyLimit, cmd.AccountQuotaHasWeeklyLimit)
 		if err != nil && !errors.Is(err, service.ErrAccountNotFound) {
 			return err
 		}
@@ -470,6 +474,19 @@ func incrementUsageBillingAPIKeyRateLimit(ctx context.Context, tx *sql.Tx, apiKe
 const accountQuotaTotalIncrementExpr = `COALESCE(extra, '{}'::jsonb)
 			|| jsonb_build_object('quota_used', COALESCE((extra->>'quota_used')::numeric, 0) + $1)`
 
+// Five-hour budgets use one anchored period, independently of daily resets.
+// Keep this small conditional in all four daily/weekly statement variants so
+// a configuration change in the database is honored even with stale hints.
+const accountQuota5hIncrementExpr = `
+			|| CASE WHEN COALESCE((extra->>'quota_5h_limit')::numeric, 0) > 0 THEN
+				jsonb_build_object(
+					'quota_5h_used', CASE WHEN ` + fiveHourExpiredExpr + ` THEN $1
+						ELSE COALESCE((extra->>'quota_5h_used')::numeric, 0) + $1 END,
+					'quota_5h_start', CASE WHEN ` + fiveHourExpiredExpr + ` THEN ` + nowUTC + `
+						ELSE extra->>'quota_5h_start' END
+				)
+			ELSE '{}'::jsonb END`
+
 // accountQuotaDailyIncrementExpr 在库中设置了日上限时累加日用量，周期过期时从本次金额重新计数。
 const accountQuotaDailyIncrementExpr = `
 			|| CASE WHEN COALESCE((extra->>'quota_daily_limit')::numeric, 0) > 0 THEN
@@ -483,7 +500,7 @@ const accountQuotaDailyIncrementExpr = `
 					THEN ` + nowUTC + `
 					ELSE COALESCE(extra->>'quota_daily_start', ` + nowUTC + `) END
 				)
-				|| CASE WHEN ` + dailyExpiredExpr + ` AND ` + nextDailyResetAtExpr + ` IS NOT NULL
+				|| CASE WHEN ` + nextDailyResetAtExpr + ` IS NOT NULL
 				   THEN jsonb_build_object('quota_daily_reset_at', ` + nextDailyResetAtExpr + `)
 				   ELSE '{}'::jsonb END
 			ELSE '{}'::jsonb END`
@@ -528,7 +545,9 @@ const accountQuotaIncrementReturning = `
 			COALESCE((extra->>'quota_daily_used')::numeric, 0),
 			COALESCE((extra->>'quota_daily_limit')::numeric, 0),
 			COALESCE((extra->>'quota_weekly_used')::numeric, 0),
-			COALESCE((extra->>'quota_weekly_limit')::numeric, 0)`
+			COALESCE((extra->>'quota_weekly_limit')::numeric, 0),
+			COALESCE((extra->>'quota_5h_used')::numeric, 0),
+			COALESCE((extra->>'quota_5h_limit')::numeric, 0)`
 
 // accountQuotaIncrementSQLs 按 accountQuotaIncrementSQLIndex 存放账号配额累加语句。省略日或周维度的语句
 // 在 WHERE 中附加 accountQuotaExtraIsObjectCond 与被省略维度的未设置条件，条件不成立时命中 0 行；
@@ -550,7 +569,7 @@ func buildAccountQuotaIncrementSQLs() [4]string {
 	var sqls [4]string
 	for _, daily := range []bool{false, true} {
 		for _, weekly := range []bool{false, true} {
-			set := accountQuotaTotalIncrementExpr
+			set := accountQuotaTotalIncrementExpr + accountQuota5hIncrementExpr
 			where := "id = $2 AND deleted_at IS NULL"
 			if !daily || !weekly {
 				where += "\n\t\t\tAND " + accountQuotaExtraIsObjectCond
@@ -598,7 +617,8 @@ func incrementUsageBillingAccountQuota(ctx context.Context, tx *sql.Tx, accountI
 	crossedTotal := state.TotalLimit > 0 && state.TotalUsed >= state.TotalLimit && (state.TotalUsed-amount) < state.TotalLimit
 	crossedDaily := state.DailyLimit > 0 && state.DailyUsed >= state.DailyLimit && (state.DailyUsed-amount) < state.DailyLimit
 	crossedWeekly := state.WeeklyLimit > 0 && state.WeeklyUsed >= state.WeeklyLimit && (state.WeeklyUsed-amount) < state.WeeklyLimit
-	if crossedTotal || crossedDaily || crossedWeekly {
+	crossed5h := state.FiveHourLimit > 0 && state.FiveHourUsed >= state.FiveHourLimit && (state.FiveHourUsed-amount) < state.FiveHourLimit
+	if crossedTotal || crossedDaily || crossedWeekly || crossed5h {
 		if err := enqueueSchedulerOutbox(ctx, tx, service.SchedulerOutboxEventAccountChanged, &accountID, nil, nil); err != nil {
 			logger.LegacyPrintf("repository.usage_billing", "[SchedulerOutbox] enqueue quota exceeded failed: account=%d err=%v", accountID, err)
 			return nil, err
@@ -621,6 +641,7 @@ func execAccountQuotaIncrement(ctx context.Context, tx *sql.Tx, query string, ac
 			&state.TotalUsed, &state.TotalLimit,
 			&state.DailyUsed, &state.DailyLimit,
 			&state.WeeklyUsed, &state.WeeklyLimit,
+			&state.FiveHourUsed, &state.FiveHourLimit,
 		); err != nil {
 			_ = rows.Close()
 			return nil, err

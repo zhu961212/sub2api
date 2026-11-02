@@ -1471,14 +1471,15 @@ const loadUsage = async (options?: { source?: 'passive' | 'active'; bypassCache?
   loading.value = true
   error.value = null
 
+  const account = props.account
   try {
 		const fetchFn = () => options?.source
-			? adminAPI.accounts.getUsage(props.account.id, options.source, options.bypassCache === true)
-			: adminAPI.accounts.getUsage(props.account.id)
-    const result = await enqueueUsageRequest(props.account, fetchFn)
-    if (!unmounted.value) {
+			? adminAPI.accounts.getUsage(account.id, options.source, options.bypassCache === true)
+			: adminAPI.accounts.getUsage(account.id)
+    const result = await enqueueUsageRequest(account, fetchFn)
+    if (!unmounted.value && props.account.id === account.id) {
       usageInfo.value = result
-      _usageCache.set(props.account.id, { data: result, ts: Date.now() })
+      _usageCache.set(account.id, { data: result, ts: Date.now() })
     }
   } catch (e: any) {
     if (!unmounted.value) {
@@ -1541,9 +1542,13 @@ const attachVisibilityObserver = () => {
 }
 
 const loadActiveUsage = async () => {
+  const accountID = props.account.id
   activeQueryLoading.value = true
   try {
-    usageInfo.value = await adminAPI.accounts.getUsage(props.account.id, 'active', true)
+    const result = await adminAPI.accounts.getUsage(accountID, 'active', true)
+    if (unmounted.value || props.account.id !== accountID) return
+    usageInfo.value = result
+    _usageCache.set(accountID, { data: result, ts: Date.now() })
   } catch (e: any) {
     console.error('Failed to load active usage:', e)
   } finally {
@@ -1587,8 +1592,8 @@ const makeQuotaBar = (
       const startStr = extra?.[startKey] as string | undefined
       if (startStr) {
         const startDate = new Date(startStr)
-        const periodMs = isDaily ? 24 * 60 * 60 * 1000 : 7 * 24 * 60 * 60 * 1000
-        resetsAt = new Date(startDate.getTime() + periodMs).toISOString()
+        const periodMs = (isDaily ? 24 : 7 * 24) * 60 * 60 * 1000
+        if (Number.isFinite(startDate.getTime())) resetsAt = new Date(startDate.getTime() + periodMs).toISOString()
       }
     }
   }
@@ -1596,7 +1601,7 @@ const makeQuotaBar = (
 }
 
 const hasApiKeyQuota = computed(() => {
-  if (!supportsAccountQuota(props.account.type)) return false
+  if (props.account.parent_account_id || !supportsAccountQuota(props.account.type, props.account.platform)) return false
   return (
     (props.account.quota_daily_limit ?? 0) > 0 ||
     (props.account.quota_weekly_limit ?? 0) > 0 ||

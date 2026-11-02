@@ -2349,7 +2349,7 @@
 
       <!-- 配额控制 (非 Anthropic apikey/bedrock，以及 Vertex service_account) -->
       <div
-        v-else-if="supportsAccountQuota(form.type)"
+        v-else-if="supportsAccountQuota(form.type, form.platform)"
         class="border-t border-gray-200 pt-4 dark:border-dark-600 space-y-4"
       >
         <div class="mb-3">
@@ -4248,9 +4248,10 @@ const oauthStepTitle = computed(() => {
 // 上游ID：直接上游声明请求标识的响应头名，留空不记录。
 const upstreamRequestIdHeader = ref('')
 const withUpstreamRequestIdHeader = <T extends Record<string, unknown> | undefined>(extra: T): T | Record<string, unknown> => {
+  const quotaExtra = withAccountQuota(extra)
   const name = upstreamRequestIdHeader.value.trim()
-  if (!name) return extra
-  return { ...(extra || {}), upstream_request_id_header: name }
+  if (!name) return quotaExtra as T | Record<string, unknown>
+  return { ...(quotaExtra || {}), upstream_request_id_header: name }
 }
 
 const baseUrlHint = computed(() => {
@@ -6273,19 +6274,14 @@ const handleValidateSessionToken = (_sessionToken: string) => {
 const formatDateTimeLocal = formatDateTimeLocalInput
 const parseDateTimeLocal = parseDateTimeLocalInput
 
-// Create account and handle success/failure
-const createAccountAndFinish = async (
-  platform: AccountPlatform,
-  type: AccountType,
-  credentials: Record<string, unknown>,
-  extra?: Record<string, unknown>
+// Shared by OAuth exchange, manual tokens, session imports and API-key creation.
+const withAccountQuota = (
+  extra?: Record<string, unknown>,
+  type: AccountType = form.type,
+  platform: AccountPlatform = form.platform
 ) => {
-  if (!applyTempUnschedConfig(credentials)) {
-    return
-  }
-  // Inject quota limits for apikey/bedrock/service_account accounts
-  let finalExtra = withUpstreamRequestIdHeader(extra)
-  if (supportsAccountQuota(type)) {
+  let finalExtra = extra
+  if (supportsAccountQuota(type, platform)) {
     const quotaExtra: Record<string, unknown> = { ...(finalExtra || {}) }
     if (editQuotaLimit.value != null && editQuotaLimit.value > 0) {
       quotaExtra.quota_limit = editQuotaLimit.value
@@ -6315,6 +6311,20 @@ const createAccountAndFinish = async (
       finalExtra = quotaExtra
     }
   }
+  return finalExtra
+}
+
+// Create account and handle success/failure
+const createAccountAndFinish = async (
+  platform: AccountPlatform,
+  type: AccountType,
+  credentials: Record<string, unknown>,
+  extra?: Record<string, unknown>
+) => {
+  if (!applyTempUnschedConfig(credentials)) {
+    return
+  }
+  const finalExtra = withUpstreamRequestIdHeader(withAccountQuota(extra, type, platform))
   if (platform === 'openai') {
     if (type === 'apikey') {
       applyOpenAIEndpointCapabilities(credentials)

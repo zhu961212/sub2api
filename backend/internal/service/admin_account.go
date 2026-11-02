@@ -98,6 +98,8 @@ func cloneAccountJSONMap(value map[string]any) (map[string]any, error) {
 }
 
 var duplicateAccountDiscardedExtraKeys = map[string]struct{}{
+	ModelEvaluationResultsExtraKey: {},
+	ModelEvaluationPauseExtraKey:   {},
 	// A retry identity belongs to the operation that created one copy, not to later copies.
 	duplicateAccountOperationIDExtraKey: {},
 	// External sync identity belongs to one local account only.
@@ -106,6 +108,8 @@ var duplicateAccountDiscardedExtraKeys = map[string]struct{}{
 	"crs_synced_at":  {},
 	// Local quota usage and derived window timestamps must start fresh.
 	"quota_used":            {},
+	"quota_5h_used":         {},
+	"quota_5h_start":        {},
 	"quota_daily_used":      {},
 	"quota_weekly_used":     {},
 	"quota_daily_start":     {},
@@ -423,6 +427,8 @@ func buildAccountForCreate(input *CreateAccountInput, accountExtra map[string]an
 	delete(accountExtra, OllamaCloudUsageSnapshotExtraKey)
 	delete(accountExtra, OpenCodeGoUsageAutoRefreshExtraKey)
 	delete(accountExtra, OpenCodeGoUsageSnapshotExtraKey)
+	delete(accountExtra, ModelEvaluationResultsExtraKey)
+	delete(accountExtra, ModelEvaluationPauseExtraKey)
 	accountExtra = prepareCodexFingerprintExtraForCreate(input.Platform, input.Type, accountExtra)
 	account := &Account{
 		Name:        input.Name,
@@ -687,12 +693,16 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 		delete(normalizedExtra, OllamaCloudUsageSnapshotExtraKey)
 		delete(normalizedExtra, OpenCodeGoUsageAutoRefreshExtraKey)
 		delete(normalizedExtra, OpenCodeGoUsageSnapshotExtraKey)
+		delete(normalizedExtra, ModelEvaluationResultsExtraKey)
+		delete(normalizedExtra, ModelEvaluationPauseExtraKey)
 		// 目录观察和能力 metadata 只由同步写入。表单里的旧值或注入值不能进入本次更新。
 		delete(normalizedExtra, grokObservedModelsExtraKey)
 		delete(normalizedExtra, UpstreamModelMetadataExtraKey)
 		// 保留配额用量和专用服务受管字段，防止普通账号编辑意外覆盖。
 		for _, key := range []string{
 			"quota_used",
+			"quota_5h_used",
+			"quota_5h_start",
 			"quota_daily_used",
 			"quota_daily_start",
 			"quota_weekly_used",
@@ -709,6 +719,8 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 			OpenAIAutoResetCreditStateExtraKey,
 			OpenCodeGoUsageAutoRefreshExtraKey,
 			OpenCodeGoUsageSnapshotExtraKey,
+			ModelEvaluationResultsExtraKey,
+			ModelEvaluationPauseExtraKey,
 		} {
 			if v, ok := account.Extra[key]; ok {
 				normalizedExtra[key] = v
@@ -943,6 +955,8 @@ func (s *adminServiceImpl) UpdateAccountExtra(ctx context.Context, id int64, upd
 	delete(updates, OllamaCloudUsageSnapshotExtraKey)
 	delete(updates, OpenCodeGoUsageAutoRefreshExtraKey)
 	delete(updates, OpenCodeGoUsageSnapshotExtraKey)
+	delete(updates, ModelEvaluationResultsExtraKey)
+	delete(updates, ModelEvaluationPauseExtraKey)
 	if _, exists := updates[openAILongContextBillingEnabledKey]; exists {
 		account, err := s.accountRepo.GetByID(ctx, id)
 		if err != nil {
@@ -972,6 +986,8 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 	delete(input.Extra, OllamaCloudUsageSnapshotExtraKey)
 	delete(input.Extra, OpenCodeGoUsageAutoRefreshExtraKey)
 	delete(input.Extra, OpenCodeGoUsageSnapshotExtraKey)
+	delete(input.Extra, ModelEvaluationResultsExtraKey)
+	delete(input.Extra, ModelEvaluationPauseExtraKey)
 
 	if len(input.AccountIDs) == 0 && input.Filters != nil {
 		accountIDs, err := s.resolveBulkUpdateTargetIDs(ctx, input.Filters)

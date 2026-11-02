@@ -51,6 +51,14 @@ function makeAccount(overrides: Partial<Account>): Account {
 }
 
 describe('AccountStatusIndicator', () => {
+  it('shows quota exhaustion when the five-hour account budget is used up', () => {
+    const wrapper = mount(AccountStatusIndicator, {
+      props: { account: makeAccount({ platform: 'openai', type: 'oauth', quota_5h_limit: 10, quota_5h_used: 10 }) },
+      global: { stubs: { Icon: true } },
+    })
+    expect(wrapper.text()).toContain('admin.accounts.status.quotaExceeded')
+  })
+
   it('Claude 5 系列模型限流时显示 Opus 和 Sonnet 的短别名', () => {
     const wrapper = mount(AccountStatusIndicator, {
       props: {

@@ -1376,6 +1376,9 @@ export interface Account {
   // API Key 账号配额限制
   quota_limit?: number | null
   quota_used?: number | null
+  quota_5h_limit?: number | null
+  quota_5h_used?: number | null
+  quota_5h_reset_at?: string | null
   quota_daily_limit?: number | null
   quota_daily_used?: number | null
   quota_weekly_limit?: number | null
@@ -1491,6 +1494,7 @@ export interface GrokBillingSummary {
 }
 
 export interface AccountUsageInfo {
+  local_quota?: import('./accountLocalQuota').AccountLocalQuotaSnapshot
   source?: 'passive' | 'active'
   updated_at: string | null
   five_hour: UsageProgress | null
