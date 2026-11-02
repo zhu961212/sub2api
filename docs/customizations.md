@@ -125,9 +125,15 @@ Do not deploy the unmodified official Compose file alone: its application
 image is the official build and does not contain these changes.
 
 The `main` branch publishes `ghcr.io/zhu961212/sub2api:custom-v2` through
-`.github/workflows/custom-image.yml` for both AMD64 and ARM64. On Debian 12,
-log in to GHCR with a token that can read packages, then replace only the
-application container:
+`.github/workflows/custom-image.yml` for both AMD64 and ARM64. Because this
+is a fork, GitHub does not grant the workflow token permission to publish
+packages. Add a repository Actions secret named `GHCR_TOKEN` first. It should
+be a GitHub classic personal access token with `write:packages` and
+`read:packages` for the publishing account. After saving the secret, run
+**Actions → Publish Custom Image → Run workflow** once.
+
+On Debian 12, log in to GHCR with a token that can read packages, then replace
+only the application container:
 
 ```powershell
 cd /opt/sub2api
