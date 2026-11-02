@@ -124,19 +124,28 @@ Official changes can conflict with custom code even with this layout.
 Do not deploy the unmodified official Compose file alone: its application
 image is the official build and does not contain these changes.
 
-After configuring a development `.env`, inspect the merged configuration:
+The `main` branch publishes `ghcr.io/zhu961212/sub2api:custom-v2` through
+`.github/workflows/custom-image.yml` for both AMD64 and ARM64. On Debian 12,
+log in to GHCR with a token that can read packages, then replace only the
+application container:
 
 ```powershell
-Push-Location deploy
-docker compose -f docker-compose.local.yml -f docker-compose.custom.yml config
-docker compose -f docker-compose.local.yml -f docker-compose.custom.yml build sub2api
-docker compose -f docker-compose.local.yml -f docker-compose.custom.yml up -d
-Pop-Location
+cd /opt/sub2api
+git fetch origin main
+git switch main
+git pull --ff-only origin main
+
+echo "$GHCR_TOKEN" | docker login ghcr.io -u zhu961212 --password-stdin
+docker compose -f deploy/docker-compose.local.yml -f deploy/docker-compose.custom.yml config
+docker compose -f deploy/docker-compose.local.yml -f deploy/docker-compose.custom.yml pull sub2api
+docker compose -f deploy/docker-compose.local.yml -f deploy/docker-compose.custom.yml up -d --no-deps sub2api
+docker compose -f deploy/docker-compose.local.yml -f deploy/docker-compose.custom.yml logs --tail=100 sub2api
 ```
 
-The override builds this checkout as `sub2api-custom:local`. Set
-`SUB2API_IMAGE`, `SUB2API_VERSION` and `SUB2API_COMMIT` explicitly for a
-release. The defaults identify a local custom build and do not reference a
-previously published legacy image. Verify the resulting image, version and
-commit before moving real traffic. Deployment and publishing are separate
-user-authorized steps, not part of the source migration.
+`GHCR_TOKEN` is entered on the server and should have package read access.
+The compose override keeps the existing PostgreSQL, Redis and `deploy/data`
+mounts. Do not run `docker compose down -v`. Migrations 250-252 run during
+application startup; back up PostgreSQL before the first upgrade.
+
+For an offline or local build, set `SUB2API_IMAGE=sub2api-custom:local` and
+run `docker compose ... build sub2api` before `up -d --no-deps`.

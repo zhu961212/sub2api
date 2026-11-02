@@ -1,7 +1,8 @@
-# Layer over docker-compose.local.yml; never run the official image by accident.
+# Layer over docker-compose.local.yml. The published custom image is the
+# default; set SUB2API_IMAGE to pin a digest or use the local build fallback.
 services:
   sub2api:
-    image: ${SUB2API_IMAGE:-sub2api-custom:local}
+    image: ${SUB2API_IMAGE:-ghcr.io/zhu961212/sub2api:custom-v2}
     build:
       context: ..
       dockerfile: Dockerfile
